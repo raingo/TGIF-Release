@@ -6,7 +6,7 @@ The Tumblr GIF (TGIF) dataset contains 100K animated GIFs and 120K sentences des
 If you end up using the dataset, we ask you to cite the following paper:
 
   Yuncheng Li, Yale Song, Liangliang Cao, Joel Tetreault, Larry Goldberg,
-  Alejandro Jaimes, Jiebo Luo. "TGIF: A New Dataset and Benchmark on Animated 
+  Alejandro Jaimes, Jiebo Luo. "TGIF: A New Dataset and Benchmark on Animated
   GIF Description", CVPR 2016
 
 If you have any question regarding the dataset, please contact:
@@ -14,8 +14,8 @@ If you have any question regarding the dataset, please contact:
   Yuncheng Li <yli@cs.rochester.edu>
 
 # License
-This dataset is provided to be used for approved non-commercial research 
-purposes. No personally identifying information is available in this dataset. 
+This dataset is provided to be used for approved non-commercial research
+purposes. No personally identifying information is available in this dataset.
 
 # Full description:
 
@@ -76,4 +76,4 @@ We thank the Flickr vision team, including Gerry Pesavento, Huy Nguyen and
 others for their support and help in collecting descriptions via crowdsourcing.
 
 # Notes
-Last edit: March 11, 2016
+Last edit: April 5, 2016
