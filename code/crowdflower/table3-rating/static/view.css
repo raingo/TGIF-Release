@@ -1,0 +1,15 @@
+@charset "utf-8";
+
+/**
+ * view.css
+ *
+ * @author
+ * @version 2015/10/13
+ */
+html,body{margin:20; padding:20; }
+
+
+ul.errors {
+color:red;
+}
+input.submit {background-color:#FFCC99; color:#0099FF;font-size:15pt;}

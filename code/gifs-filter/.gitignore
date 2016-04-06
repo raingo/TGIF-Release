@@ -1,0 +1,7 @@
+*.pyc
+*.o
+data
+*.swp
+.assign*
+tmp.sh
+.nfs*

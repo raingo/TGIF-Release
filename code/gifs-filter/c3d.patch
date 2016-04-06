@@ -1,0 +1,11 @@
+--- math_functions.cu	2015-08-14 11:09:41.096458505 -0400
++++ math_functions.cu.org	2015-08-14 11:09:24.420910035 -0400
+@@ -137,7 +137,7 @@
+ 
+ DEFINE_AND_INSTANTIATE_GPU_UNARY_FUNC(sign, y[index] = (Dtype(0) < x[index])
+                                       - (x[index] < Dtype(0)));
+-//DEFINE_AND_INSTANTIATE_GPU_UNARY_FUNC(sgnbit, y[index] = signbit(x[index]));
++DEFINE_AND_INSTANTIATE_GPU_UNARY_FUNC(sgnbit, y[index] = signbit(x[index]));
+ DEFINE_AND_INSTANTIATE_GPU_UNARY_FUNC(fabs, y[index] = fabs(x[index]));
+ 
+ __global__ void popc_kernel(const int n, const float* a,

@@ -1,0 +1,1 @@
+java -Xmx4g -XX:ParallelGCThreads=1 -cp 3rdparty/stanford_corenlp_pywrapper/stanford_corenlp_pywrapper/lib/*:3rdparty/stanford-corenlp-full-2015-04-20/* corenlp.SocketServer --server 12340 --configdict '{"pos.model": "edu/stanford/nlp/models/pos-tagger/english-bidirectional/english-bidirectional-distsim.tagger", "annotators": "tokenize, ssplit, pos, lemma"}'

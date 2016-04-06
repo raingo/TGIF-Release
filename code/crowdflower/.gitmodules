@@ -1,0 +1,3 @@
+[submodule "gif-caption-CF/coco-caption"]
+	path = gif-caption-CF/coco-caption
+	url = git@github.com:raingo/coco-caption.git

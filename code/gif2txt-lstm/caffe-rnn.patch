@@ -1,0 +1,5529 @@
+diff --git a/.gitmodules b/.gitmodules
+new file mode 100644
+index 0000000..d50616d
+--- /dev/null
++++ b/.gitmodules
+@@ -0,0 +1,3 @@
++[submodule "models/RNN/coco-caption"]
++	path = models/RNN/coco-caption
++	url = git@github.com:raingo/coco-caption.git
+diff --git a/include/caffe/data_transformer.hpp b/include/caffe/data_transformer.hpp
+index 97b4ee6..c613ac3 100644
+--- a/include/caffe/data_transformer.hpp
++++ b/include/caffe/data_transformer.hpp
+@@ -25,6 +25,13 @@ class DataTransformer {
+    */
+   void InitRand();
+ 
++  /*
++   * Reset random states of the transformer
++   * Useful if we want to share transformations inside a batch
++   * user of data_transformer has to call Reset appropriately
++   * */
++  void Reset();
++
+   /**
+    * @brief Applies the transformation defined in the data layer's
+    * transform_param block to the data.
+@@ -135,8 +142,12 @@ class DataTransformer {
+    *    The upperbound (exclusive) value of the random number.
+    * @return
+    *    A uniformly random integer value from ({0, 1, ..., n-1}).
++   *
++   * update by fix-sp-crop branch:
++   *  if n is negative, return the rng() directly
++   *  if state is non-negative, use the state, instead of rng()
+    */
+-  virtual int Rand(int n);
++  virtual int Rand(int n, int state = -1);
+ 
+   void Transform(const Datum& datum, Dtype* transformed_data);
+   // Tranformation parameters
+@@ -147,6 +158,13 @@ class DataTransformer {
+   Phase phase_;
+   Blob<Dtype> data_mean_;
+   vector<Dtype> mean_values_;
++
++  // special states to share spatial crop inside a batch
++  // user of data_transformer should call reset appropriately
++  // these are random state, rather than the actual data
++  int w_off_;
++  int h_off_;
++  int do_mirror_;
+ };
+ 
+ }  // namespace caffe
+diff --git a/include/caffe/layers/eltwise_layer.hpp b/include/caffe/layers/eltwise_layer.hpp
+index 091de83..87f7fa6 100644
+--- a/include/caffe/layers/eltwise_layer.hpp
++++ b/include/caffe/layers/eltwise_layer.hpp
+@@ -42,6 +42,7 @@ class EltwiseLayer : public Layer<Dtype> {
+   EltwiseParameter_EltwiseOp op_;
+   vector<Dtype> coeffs_;
+   Blob<int> max_idx_;
++  bool coeff_blob_;
+ 
+   bool stable_prod_grad_;
+ };
+diff --git a/include/caffe/layers/lstm_unit_layer.hpp b/include/caffe/layers/lstm_unit_layer.hpp
+new file mode 100644
+index 0000000..ae7e414
+--- /dev/null
++++ b/include/caffe/layers/lstm_unit_layer.hpp
+@@ -0,0 +1,104 @@
++#ifndef HEADER_LSTM_UNIT_LAYER
++#define HEADER_LSTM_UNIT_LAYER
++
++#include <vector>
++
++#include "caffe/blob.hpp"
++#include "caffe/layer.hpp"
++#include "caffe/proto/caffe.pb.h"
++
++namespace caffe {
++
++/**
++ * @brief A helper for LSTMLayer: computes a single timestep of the
++ *        non-linearity of the LSTM, producing the updated cell and hidden
++ *        states.
++ *        from https://github.com/BVLC/caffe/pull/2033
++ */
++template <typename Dtype>
++class LSTMUnitLayer : public Layer<Dtype> {
++ public:
++  explicit LSTMUnitLayer(const LayerParameter& param)
++      : Layer<Dtype>(param) {}
++  virtual void Reshape(const vector<Blob<Dtype>*>& bottom,
++      const vector<Blob<Dtype>*>& top);
++
++  virtual inline const char* type() const { return "LSTMUnit"; }
++  virtual inline int ExactNumBottomBlobs() const { return 3; }
++  virtual inline int ExactNumTopBlobs() const { return 2; }
++
++  virtual inline bool AllowForceBackward(const int bottom_index) const {
++    // Can't propagate to sequence continuation indicators.
++    return bottom_index != 2;
++  }
++
++ protected:
++  /**
++   * @param bottom input Blob vector (length 3)
++   *   -# @f$ (1 \times N \times D) @f$
++   *      the previous timestep cell state @f$ c_{t-1} @f$
++   *   -# @f$ (1 \times N \times 4D) @f$
++   *      the "gate inputs" @f$ [i_t', f_t', o_t', g_t'] @f$
++   *   -# @f$ (1 \times 1 \times N) @f$
++   *      the sequence continuation indicators  @f$ \delta_t @f$
++   * @param top output Blob vector (length 2)
++   *   -# @f$ (1 \times N \times D) @f$
++   *      the updated cell state @f$ c_t @f$, computed as:
++   *          i_t := \sigmoid[i_t']
++   *          f_t := \sigmoid[f_t']
++   *          o_t := \sigmoid[o_t']
++   *          g_t := \tanh[g_t']
++   *          c_t := cont_t * (f_t .* c_{t-1}) + (i_t .* g_t)
++   *   -# @f$ (1 \times N \times D) @f$
++   *      the updated hidden state @f$ h_t @f$, computed as:
++   *          h_t := o_t .* \tanh[c_t]
++   */
++  virtual void Forward_cpu(const vector<Blob<Dtype>*>& bottom,
++      const vector<Blob<Dtype>*>& top);
++  virtual void Forward_gpu(const vector<Blob<Dtype>*>& bottom,
++      const vector<Blob<Dtype>*>& top);
++
++  /**
++   * @brief Computes the error gradient w.r.t. the LSTMUnit inputs.
++   *
++   * @param top output Blob vector (length 2), providing the error gradient with
++   *        respect to the outputs
++   *   -# @f$ (1 \times N \times D) @f$:
++   *      containing error gradients @f$ \frac{\partial E}{\partial c_t} @f$
++   *      with respect to the updated cell state @f$ c_t @f$
++   *   -# @f$ (1 \times N \times D) @f$:
++   *      containing error gradients @f$ \frac{\partial E}{\partial h_t} @f$
++   *      with respect to the updated cell state @f$ h_t @f$
++   * @param propagate_down see Layer::Backward.
++   * @param bottom input Blob vector (length 3), into which the error gradients
++   *        with respect to the LSTMUnit inputs @f$ c_{t-1} @f$ and the gate
++   *        inputs are computed.  Computatation of the error gradients w.r.t.
++   *        the sequence indicators is not implemented.
++   *   -# @f$ (1 \times N \times D) @f$
++   *      the error gradient w.r.t. the previous timestep cell state
++   *      @f$ c_{t-1} @f$
++   *   -# @f$ (1 \times N \times 4D) @f$
++   *      the error gradient w.r.t. the "gate inputs"
++   *      @f$ [
++   *          \frac{\partial E}{\partial i_t}
++   *          \frac{\partial E}{\partial f_t}
++   *          \frac{\partial E}{\partial o_t}
++   *          \frac{\partial E}{\partial g_t}
++   *          ] @f$
++   *   -# @f$ (1 \times 1 \times N) @f$
++   *      the gradient w.r.t. the sequence continuation indicators
++   *      @f$ \delta_t @f$ is currently not computed.
++   */
++  virtual void Backward_cpu(const vector<Blob<Dtype>*>& top,
++      const vector<bool>& propagate_down, const vector<Blob<Dtype>*>& bottom);
++  virtual void Backward_gpu(const vector<Blob<Dtype>*>& top,
++      const vector<bool>& propagate_down, const vector<Blob<Dtype>*>& bottom);
++
++  /// @brief The hidden and output dimension.
++  int hidden_dim_;
++  Blob<Dtype> X_acts_;
++};
++
++}  // namespace caffe
++
++#endif
+diff --git a/include/caffe/tempo_crop_layer.hpp b/include/caffe/tempo_crop_layer.hpp
+new file mode 100644
+index 0000000..46e3acc
+--- /dev/null
++++ b/include/caffe/tempo_crop_layer.hpp
+@@ -0,0 +1,68 @@
++#ifndef HEADER_TEMPO_CROP_LAYER
++#define HEADER_TEMPO_CROP_LAYER
++
++#include <string>
++#include <utility>
++#include <vector>
++
++#include "caffe/blob.hpp"
++#include "caffe/common.hpp"
++#include "caffe/layer.hpp"
++#include "caffe/proto/caffe.pb.h"
++
++namespace caffe {
++
++/*
++ * TempoCropLayer takes a vector of mask [0,1], a input_length and a output_length as parameters.
++ * Output another vector of 0,1, which represents a tempora random cropping result.
++ *
++ * The mask is always left padded for each sequence
++ * the output mask is to be used by FilterLayer and
++ * it makes sure the output of the FilterLayer will be left padded as well
++ * The number of 1's for each sequence is always output_length
++ *
++ * Example: orignal mask, shape 12: 001101110001
++ * The input_length is 4 and output_length is 2
++ * Possible mask output are: 0011 and 0110 and 0011
++ * They will be concatenated together as 001101100011
++ *
++ */
++template <typename Dtype>
++class TempoCropLayer: public Layer<Dtype> {
++ public:
++  explicit TempoCropLayer(const LayerParameter& param)
++      : Layer<Dtype>(param) {}
++  virtual void LayerSetUp(const vector<Blob<Dtype>*>& bottom,
++      const vector<Blob<Dtype>*>& top);
++  virtual void Reshape(const vector<Blob<Dtype>*>& bottom,
++      const vector<Blob<Dtype>*>& top);
++
++  virtual inline const char* type() const { return "TempoCrop"; }
++  virtual inline int ExactNumBottomBlobs() const { return 1; }
++  virtual inline int ExactNumTopBlobs() const { return 1; }
++
++ protected:
++  virtual void Forward_cpu(const vector<Blob<Dtype>*>& bottom,
++      const vector<Blob<Dtype>*>& top);
++  virtual void Backward_cpu(const vector<Blob<Dtype>*>& top,
++      const vector<bool>& propagate_down, const vector<Blob<Dtype>*>& bottom) {
++    for (int i = 0; i < propagate_down.size(); ++i) {
++      if (propagate_down[i]) { NOT_IMPLEMENTED; }
++    }
++  }
++
++  int input_length_;
++  int output_length_;
++  int num_sequences_;
++  int count_;
++
++  virtual int Rand();
++  shared_ptr<Caffe::RNG> rng_;
++
++};
++
++
++}  // namespace caffe
++
++
++#endif
+diff --git a/models/RNN/.gitignore b/models/RNN/.gitignore
+new file mode 100644
+index 0000000..809ca77
+--- /dev/null
++++ b/models/RNN/.gitignore
+@@ -0,0 +1,3 @@
++
++SF
++semafor
+diff --git a/models/RNN/CharRNN/.gitignore b/models/RNN/CharRNN/.gitignore
+new file mode 100644
+index 0000000..eb7ce6d
+--- /dev/null
++++ b/models/RNN/CharRNN/.gitignore
+@@ -0,0 +1,2 @@
++input
++char-rnn
+diff --git a/models/RNN/CharRNN/char-seq-data.py b/models/RNN/CharRNN/char-seq-data.py
+new file mode 100644
+index 0000000..fd07ee5
+--- /dev/null
++++ b/models/RNN/CharRNN/char-seq-data.py
+@@ -0,0 +1,94 @@
++#!/usr/bin/env python
++
++"""
++Python source code - replace this with a description of the code and write the code below this text.
++"""
++import os
++import os.path as osp
++from config import cfg, cfg_from_file
++import numpy as np
++import random, string
++
++import h5py
++
++def main():
++    import sys; data_dir = sys.argv[1]
++
++    config_file = osp.join(data_dir, 'config.yaml')
++    if osp.exists(config_file):
++        cfg_from_file(config_file)
++
++    nT = cfg.nT
++
++    input = open(osp.join(data_dir, 'input.txt')).read()
++
++    vocab = list(set(input))
++    with open(osp.join(data_dir, 'vocab'), 'w') as writer:
++        vocab = ''.join(vocab)
++        vocab  = filter(lambda x: x in string.printable, vocab)
++        writer.write(vocab)
++
++    vocab = dict([(w, idx) for idx, w in enumerate(vocab)])
++
++    input = filter(lambda x: x in vocab, input)
++
++    N = len(input) / nT
++    input = input[:(N * nT)]
++
++    X = map(lambda x:vocab[x], input)
++    Y = X[1:] + [X[0]]
++
++    x = np.array(X, 'float32').reshape([-1,nT])
++    y = np.array(Y, 'float32').reshape([-1,nT])
++    cont = np.ones_like(x, 'float32')
++
++    N = x.shape[0]
++
++    idx = range(N)
++    random.shuffle(idx)
++
++    nVal =  N / 20
++
++    valIdx = idx[:nVal]
++    trainIdx = idx[nVal:]
++
++    save_hdf5(valIdx, osp.join(data_dir, 'val_hdf5'),  x = x, y = y, xmask = cont)
++    save_hdf5(trainIdx, osp.join(data_dir, 'train_hdf5'),  x = x, y = y, xmask = cont)
++
++    pass
++
++def batch(iterable, n = 1):
++   l = len(iterable)
++   for ndx in range(0, l, n):
++       yield iterable[ndx:min(ndx+n, l)]
++
++def save_hdf5(idx, save_dir, **kwargs):
++    batch_size = 100000
++
++    if not osp.exists(save_dir):
++        os.makedirs(save_dir)
++
++    output_path_list = []
++
++    for ii, bi in enumerate(batch(idx, batch_size)):
++
++        output_path = osp.join(save_dir, 'data-%d.h5' % ii)
++        output_path_list.append(output_path)
++
++        with h5py.File(output_path) as f:
++            for name, val in kwargs.items():
++                f[name] = val[bi, ]
++
++    with open(osp.join(save_dir, 'fn.list'), 'w') as f:
++        for output_path in output_path_list:
++            f.write(output_path + '\n')
++
++    print save_dir, len(idx)
++
++if __name__ == "__main__":
++    import sys
++    from IPython.core import ultratb
++    sys.excepthook = ultratb.FormattedTB(call_pdb=True)
++    main()
++
++# vim: tabstop=8 expandtab shiftwidth=4 softtabstop=4
+diff --git a/models/RNN/CharRNN/char_rnn.py b/models/RNN/CharRNN/char_rnn.py
+new file mode 100644
+index 0000000..d5430ba
+--- /dev/null
++++ b/models/RNN/CharRNN/char_rnn.py
+@@ -0,0 +1,173 @@
++#!/usr/bin/env python
++
++"""
++Python source code - replace this with a description of the code and write the code below this text.
++"""
++from caffe import layers as L, params as P, NetSpec, Top as T
++from rnn import StackRNN, LSTM, dummy_input, hidden_param, get_filler, reshape
++import os.path as osp
++from string import Template
++
++import sys; data_dir = sys.argv[1]
++
++sink_idx = 0
++def sink_top(n, top):
++    global sink_idx
++    sink_idx += 1
++    setattr(n, 'sink-%d' % sink_idx, L.Silence(top, ntop = 0))
++
++from config import cfg, cfg_from_file
++
++HidPattern = 'prevh-%d'
++nHidPattern = 'nexth-%d'
++
++def gen_init_prev(input, batch_size, rnn):
++    names = []
++    dims = []
++    sources = []
++    for i in range(rnn.nState):
++        names.append(HidPattern % i)
++        dims.append([batch_size, 1, rnn.nHidden])
++    return gen_inputs(input, names, dims, sources)
++
++def gen_inputs(inputs, names, dims, sources = None):
++    tops = []
++    if sources is None or len(sources) == 0:
++        sources = [None] * len(names)
++
++    for name, dim, source in zip(names, dims, sources):
++        inputs.append((name, dim, source))
++        tops.append(T(name, -1))
++    if len(names) == 1:
++        return tops[0]
++    else:
++        return tuple(tops)
++
++def attach_nexth(n, nexth, pat = None):
++
++    if pat is None:
++        pat = nHidPattern
++
++    for i in range(len(nexth)):
++        h = pat % i
++        setattr(n, h, nexth[i])
++
++def gen_net(n, input, x, xmask, batch_size, acc = False, y = None, nT = None):
++
++    nHidden = cfg.nHidden
++    if nT is None:
++        nT = cfg.nT
++
++    nL = cfg.nL # number of layers
++    vocab_size = get_vocab_size()
++
++    rnn = StackRNN(nHidden = nHidden, seqLen = nT, nLayers = nL, baseRNN = LSTM)
++    prevh = gen_init_prev(input, batch_size, rnn)
++
++    # decode texts
++    n.embedx = embed(x, rnn.inputSize, vocab_size)
++    output, nexth = rnn.generate(n.embedx, xmask, prevh)
++
++    attach_nexth(n, nexth)
++    for idx, o in enumerate(output):
++        if idx != len(output) - rnn.nStateBase:
++            sink_top(n, o)
++    for h in nexth:
++        sink_top(n, h)
++
++    n.predict = hidden_param(output[-rnn.nStateBase], vocab_size, 'predict', dropout = False)
++
++    if y is not None:
++        n.loss = L.SoftmaxWithLoss(n.predict, y, softmax_param = {'axis':2})
++
++    if acc:
++        n.top3 = L.Accuracy(n.predict, n.y, axis = 2, top_k = 3)
++        n.top5 = L.Accuracy(n.predict, n.y, axis = 2, top_k = 5)
++        n.top10 = L.Accuracy(n.predict, n.y, axis = 2, top_k = 10)
++
++    return n.to_proto(net_name = "CharRNN", input = input)
++
++def embed(input, nout, isize):
++
++    param = [{'name':'W_embedx'}]
++    param.append({'name':'B_embedx'})
++
++    configs = {}
++    configs['num_output'] = nout
++    configs['input_dim'] = isize
++    configs['bias_term'] = True
++    configs['param'] = param
++
++    configs['weight_filler'] = get_filler()
++
++    return L.Embed(input, **configs)
++
++def deploy(vocab_size):
++    n = NetSpec()
++    input = []
++    x, xmask = gen_inputs(input, ['x', 'xmask'], [[1,1],[1,1]])
++    return gen_net(n, input, x, xmask, 1, nT = 1)
++
++def get_vocab_size():
++    return len(open(osp.join(data_dir, 'vocab')).read())
++
++def main(split):
++    nHidden = cfg.nHidden
++    nT = cfg.nT
++    nL = cfg.nL # number of layers
++    vocab_size = get_vocab_size()
++
++    if split == 'train':
++        return trainval(vocab_size, False)
++    elif split == 'val':
++        return trainval(vocab_size, True)
++    else:
++        return deploy(vocab_size)
++
++def trainval(vocab_size, acc):
++    n = NetSpec()
++    batch_size = cfg.batch_size
++
++    if acc:
++        source = osp.join(data_dir, 'val_hdf5', 'fn.list')
++    else:
++        source = osp.join(data_dir, 'train_hdf5', 'fn.list')
++
++    n.x, n.xmask, n.y = L.HDF5Data(source = source, batch_size = batch_size, ntop = 3)
++
++    input = []
++    return gen_net(n, input, n.x, n.xmask, batch_size, y = n.y, acc = acc)
++
++if __name__ == "__main__":
++    import sys
++    from IPython.core import ultratb
++    sys.excepthook = ultratb.FormattedTB(call_pdb=True)
++
++    config_file = osp.join(data_dir, 'config.yaml')
++    if osp.exists(config_file):
++        cfg_from_file(config_file)
++
++    deploy_net = osp.join(data_dir, 'deploy.prototxt')
++    with open(deploy_net, 'w') as writer:
++        writer.write(str(main('deploy')))
++
++    train_net = osp.join(data_dir, 'train.prototxt')
++    val_net = osp.join(data_dir, 'val.prototxt')
++    snapshot = osp.join(data_dir, 'model')
++
++    with open(train_net, 'w') as w:
++        w.write(str(main('train')))
++
++    with open(val_net, 'w') as w:
++        w.write(str(main('val')))
++
++    solver_path = osp.join(data_dir, 'solver.prototxt')
++
++    solver_in_path = osp.join(data_dir, 'solver.prototxt.in')
++    with open(solver_path, 'w') as w, open(solver_in_path) as r:
++        tpl = Template(r.read())
++        w.write(tpl.substitute(train_net = train_net, test_net = val_net, snapshot = snapshot))
++
++    print solver_path
++
++# vim: tabstop=8 expandtab shiftwidth=4 softtabstop=4
+diff --git a/models/RNN/CharRNN/config.py b/models/RNN/CharRNN/config.py
+new file mode 100644
+index 0000000..04a4842
+--- /dev/null
++++ b/models/RNN/CharRNN/config.py
+@@ -0,0 +1,58 @@
++# --------------------------------------------------------
++# Copy from Fast-RCNN for the RNN code
++# --------------------------------------------------------
++
++import os
++import os.path as osp
++import numpy as np
++# `pip install easydict` if you don't have it
++from easydict import EasyDict as edict
++
++__C = edict()
++# Consumers can get config by:
++#   from fast_rcnn_config import cfg
++cfg = __C
++
++__C.nHidden = 500
++__C.nT = 80
++__C.nL = 1
++__C.batch_size = 16
++
++__C.new_width = 256
++__C.dropout = .5
++
++def _merge_a_into_b(a, b):
++    """Merge config dictionary a into config dictionary b, clobbering the
++    options in b whenever they are also specified in a.
++    """
++    if type(a) is not edict:
++        return
++
++    for k, v in a.iteritems():
++        # a must specify keys that are in b
++        if not b.has_key(k):
++            raise KeyError('{} is not a valid config key'.format(k))
++
++        # the types must match, too
++        if type(b[k]) is not type(v):
++            raise ValueError(('Type mismatch ({} vs. {}) '
++                              'for config key: {}').format(type(b[k]),
++                                                           type(v), k))
++
++        # recursively merge dicts
++        if type(v) is edict:
++            try:
++                _merge_a_into_b(a[k], b[k])
++            except:
++                print('Error under config key: {}'.format(k))
++                raise
++        else:
++            b[k] = v
++
++def cfg_from_file(filename):
++    """Load a config file and merge it into the default options."""
++    import yaml
++    with open(filename, 'r') as f:
++        yaml_cfg = edict(yaml.load(f))
++
++    _merge_a_into_b(yaml_cfg, __C)
+diff --git a/models/RNN/CharRNN/gen_data.sh b/models/RNN/CharRNN/gen_data.sh
+new file mode 100755
+index 0000000..4b54872
+--- /dev/null
++++ b/models/RNN/CharRNN/gen_data.sh
+@@ -0,0 +1,16 @@
++#!/bin/bash
++# vim ft=sh
++
++export PYTHONPATH=../../python:$PYTHONPATH
++
++NARGS=$#
++
++if [ $NARGS != 1 ]
++then
++    echo $0 data-dir
++    exit
++fi
++
++data_dir=$1
++
++python char-seq-data.py $data_dir
+diff --git a/models/RNN/CharRNN/gen_net.sh b/models/RNN/CharRNN/gen_net.sh
+new file mode 100644
+index 0000000..c40b624
+--- /dev/null
++++ b/models/RNN/CharRNN/gen_net.sh
+@@ -0,0 +1,21 @@
++#!/bin/bash
++# vim ft=sh
++
++export PYTHONPATH=../../python:$PYTHONPATH
++
++NARGS=$#
++
++if [ $NARGS != 1 ]
++then
++    echo $0 data-dir
++    exit
++fi
++
++data_dir=$1
++
++python ./char-seq-data.py $data_dir
++
++#rm $data_dir/*hdf5 $data_dir/vocab -Rf && python char-seq-data.py $data_dir
++python char_rnn_v2.py $data_dir
++./train.sh $data_dir $gpu
++#./sample.sh $data_dir
+diff --git a/models/RNN/CharRNN/rnn.py b/models/RNN/CharRNN/rnn.py
+new file mode 100644
+index 0000000..95cf74f
+--- /dev/null
++++ b/models/RNN/CharRNN/rnn.py
+@@ -0,0 +1,237 @@
++#!/usr/bin/env python
++from caffe import layers as L, params as P, NetSpec
++from caffe.proto import caffe_pb2
++from config import cfg
++
++def reshape(input, new_shape):
++    shape = caffe_pb2.BlobShape()
++    shape.dim.extend(new_shape)
++    return L.Reshape(input, shape = shape)
++
++def dummy_input(shapes):
++    bshapes = []
++    for shape in shapes:
++        bshape = caffe_pb2.BlobShape()
++        bshape.dim.extend(shape)
++        bshapes.append(bshape)
++    return L.DummyData(shape = bshapes, ntop = len(shapes))
++
++def get_filler():
++    return {'type':'uniform', 'min':-0.08, 'max':0.08}
++
++def hidden_param(bottom, num_output, name, bias_term = True, axis = 2, dropout = True, pdown = None):
++
++    params = [{'name': 'W_' + name}]
++    if bias_term:
++        params.append({'name':'B_' + name})
++
++    configs = {}
++    configs['num_output'] = num_output
++    configs['bias_term'] = bias_term
++    configs['axis'] = axis
++    configs['param'] = params
++    configs['weight_filler'] = get_filler()
++
++    if pdown is not None:
++        configs['propagate_down'] = [pdown]
++
++    fc = L.InnerProduct(bottom, **configs)
++
++    if cfg.dropout > 0 and dropout:
++        fc = L.Dropout(fc, in_place = True, dropout_ratio = cfg.dropout)
++
++    return fc
++
++class RNN(object):
++    """Basic RNN Layers"""
++    def __init__(self, nHidden, seqLen):
++        self.nHidden = nHidden
++        self.seqLen = seqLen
++        self.nState = 1
++        self.inputSize = nHidden
++
++    def check_hidden(self, hid):
++        assert len(hid) == self.nState, "Number of hidden states are wrong"
++
++    # prevh: is a list of [N * nHidden]
++    def core_rnn(self, xi, ci, prevh, static):
++        self.check_hidden(prevh)
++
++        h = prevh[0]
++
++        hcont = L.Eltwise(h, ci, operation = P.Eltwise.SUM, coeff_blob = True)
++        Whm1 = hidden_param(hcont, self.inputSize, 'h2h' + param_name, bias_term = False)
++        if static:
++            Combine = L.Eltwise(xi, Whm1, static, operation = P.Eltwise.SUM)
++        else:
++            Combine = L.Eltwise(xi, Whm1, operation = P.Eltwise.SUM)
++
++        nexth = L.Tanh(Combine)
++        return [nexth]
++
++    def _slicing(self, target):
++        if type(target) is not list:
++            if self.seqLen > 1:
++                return L.Slice(target, ntop = self.seqLen)
++            else:
++                return (target, )
++        else:
++            res = [[] for _ in range(self.seqLen)]
++            for t in target:
++                s = self._slicing(t)
++                for r, si in zip(res, s):
++                    r.append(si)
++            return res
++
++    def generate(self, input, cont, prevh, static = None, param_name = "", reverse = False):
++        SlicedX = self._slicing(input)
++        SlicedC = self._slicing(cont)
++
++        O = [[] for i in range(self.nState)]
++
++        ilist = range(self.seqLen)
++        if reverse:
++            ilist = reversed(ilist)
++
++        for i in ilist:
++            prevh = self.core_rnn(SlicedX[i], SlicedC[i], prevh, static, param_name)
++            for o, h in zip(O, prevh):
++                o.append(h)
++
++        realO = []
++
++        for o in O:
++            if self.seqLen > 1:
++                if reverse:
++                    o = list(reversed(o))
++                realO.append(L.Concat(*o))
++            else:
++                realO.append(L.Split(o[0]))
++
++        return realO, prevh
++
++class LSTM(RNN):
++    """override the core_rnn method"""
++    def __init__(self, nHidden, seqLen):
++        super(LSTM, self).__init__(nHidden, seqLen)
++        self.nState = 2
++        self.inputSize = nHidden * 4
++
++    # prevh: is a list of [N * nHidden]
++    def core_rnn(self, xi, ci, prevh, static, param_name):
++        self.check_hidden(prevh)
++
++        h = prevh[0]
++        prevc = prevh[1]
++
++        hcont = L.Eltwise(h, ci, operation = P.Eltwise.SUM, coeff_blob = True)
++        Whm1 = hidden_param(hcont, self.inputSize, 'h2h' + param_name, bias_term = False)
++        if static:
++            Combine = L.Eltwise(xi, Whm1, static, operation = P.Eltwise.SUM)
++        else:
++            Combine = L.Eltwise(xi, Whm1, operation = P.Eltwise.SUM)
++
++        nextc, nexth = L.LSTMUnit(prevc, Combine, ci, ntop = 2)
++        return [nexth, nextc]
++
++class MultiRNN(RNN):
++    """docstring for MultiRNN: support multiple input. one layer for each input"""
++    def __init__(self, nHidden, seqLen, nInput, baseRNN, clearStatic = True):
++        super(MultiRNN, self).__init__(nHidden, seqLen)
++
++        self.baseRNN = baseRNN(nHidden, -1)
++        self.nInput = nInput
++        self.nStateBase = self.baseRNN.nState
++        self.nState = self.nInput * self.nStateBase
++        self.inputSize = self.baseRNN.inputSize
++        self.clearStatic = clearStatic
++
++    def check_input(self, input):
++        assert type(input) is list, "input must be a list"
++        assert len(input) == self.nInput, "input size does not match"
++
++    def core_rnn(self, xi, ci, prevh, static, param_name):
++        self.check_hidden(prevh)
++        self.check_input(xi)
++
++        nexth = []
++
++        Xi = xi[0]
++
++        for i in range(self.nInput):
++            prevh_i = prevh[i*self.nStateBase:(i + 1)*self.nStateBase]
++            nexth_i = self.baseRNN.core_rnn(Xi, ci, prevh_i, static, '-ml%d' % i + param_name)
++
++            if i != self.nInput - 1:
++                Xii = hidden_param(nexth_i[0], self.inputSize, 'o%di' % i + param_name)
++                Xi = L.Eltwise(Xii, xi[i + 1], operation = P.Eltwise.SUM)
++
++            nexth.extend(nexth_i)
++
++            if self.clearStatic:
++                static = None
++
++        return nexth
++
++
++class StackRNN(RNN):
++    """connect multiple layers"""
++    """
++    clearStatic: whether clear static after the first layer
++    TODO: make heteogeious baseRNN possible
++    ASSUMPTION: assuming only the first hidden state goes to the next layer, following states are auxilliary states
++    """
++    def __init__(self, nHidden, seqLen, nLayers, baseRNN, clearStatic = True):
++        super(StackRNN, self).__init__(nHidden, seqLen)
++
++        self.baseRNN = baseRNN(nHidden, -1)
++        self.nLayers = nLayers
++        self.nStateBase = self.baseRNN.nState
++        self.clearStatic = clearStatic
++
++        self.nState = nLayers * self.nStateBase
++        self.inputSize = self.baseRNN.inputSize
++
++    def core_rnn(self, xi, ci, prevh, static, param_name):
++        self.check_hidden(prevh)
++
++        nexth = []
++
++        for i in range(self.nLayers):
++            prevh_i = prevh[i*self.nStateBase:(i + 1)*self.nStateBase]
++            nexth_i = self.baseRNN.core_rnn(xi, ci, prevh_i, static, '-l%d' % i + param_name)
++            xi = hidden_param(nexth_i[0], self.inputSize, 'o%di' % i + param_name)
++
++            nexth.extend(nexth_i)
++
++            if self.clearStatic:
++                static = None
++
++        return nexth
++
++def main():
++
++    test_cases = {'rnn':RNN(nHidden = 1000, seqLen = 20), 'lstm':LSTM(nHidden = 1000, seqLen = 20), 'stack-rnn':StackRNN(nHidden = 1000, seqLen = 20, baseRNN = RNN, nLayers = 10), 'stack-lstm':StackRNN(nHidden = 1000, seqLen = 20, baseRNN = LSTM, nLayers = 10)}
++
++    for name, rnn in test_cases.items():
++        n = NetSpec()
++        n.input, n.cont, n.prevh, n.static = L.Data(source = "", ntop = 4)
++        prevh = [n.prevh] * rnn.nState
++        output, prevh = rnn.generate(n.input, n.cont, prevh, static = n.static)
++        for i in range(len(output)):
++                setattr(n, 'o-%d' % i, output[i])
++                setattr(n, 'h-%d' % i, prevh[i])
++
++        with open('test/%s.prototxt' % name, 'w') as f:
++            f.write(str(n.to_proto(name = 'RNN-Net')))
++
++    pass
++
++if __name__ == "__main__":
++
++    import sys
++    from IPython.core import ultratb
++    sys.excepthook = ultratb.FormattedTB(call_pdb=True)
++    main()
++
++# vim: tabstop=8 expandtab shiftwidth=4 softtabstop=4
+diff --git a/models/RNN/CharRNN/s2vt.py b/models/RNN/CharRNN/s2vt.py
+new file mode 100644
+index 0000000..c13e4f1
+--- /dev/null
++++ b/models/RNN/CharRNN/s2vt.py
+@@ -0,0 +1,261 @@
++#!/usr/bin/env python
++
++"""
++Python source code - replace this with a description of the code and write the code below this text.
++"""
++from caffe import layers as L, params as P, NetSpec, Top as T
++from rnn import StackRNN, LSTM, dummy_input, hidden_param, get_filler, reshape
++import os.path as osp
++from string import Template
++
++import sys; data_dir = sys.argv[1]
++import caffenet
++import vgg19
++
++sink_idx = 0
++def sink_top(n, top):
++    global sink_idx
++    sink_idx += 1
++    setattr(n, 'sink-%d' % sink_idx, L.Silence(top, ntop = 0))
++
++from config import cfg, cfg_from_file
++
++HidPattern = 'prevh-%d'
++nHidPattern = 'nexth-%d'
++
++def gen_init_prev(input, batch_size, rnn):
++    names = []
++    dims = []
++    sources = []
++    for i in range(rnn.nState):
++        names.append(HidPattern % i)
++        dims.append([batch_size, 1, rnn.nHidden])
++    return gen_inputs(input, names, dims, sources)
++
++def gen_inputs(inputs, names, dims, sources = None):
++    tops = []
++    if sources is None or len(sources) == 0:
++        sources = [None] * len(names)
++
++    for name, dim, source in zip(names, dims, sources):
++        inputs.append((name, dim, source))
++        tops.append(T(name, -1))
++    if len(names) == 1:
++        return tops[0]
++    else:
++        return tuple(tops)
++
++def attach_nexth(n, nexth, pat = None):
++
++    if pat is None:
++        pat = nHidPattern
++
++    for i in range(len(nexth)):
++        h = pat % i
++        setattr(n, h, nexth[i])
++
++def gen_net(n, input, image, imask, x, xmask, batch_size, acc = False, y = None):
++
++    nHidden = cfg.nHidden
++    nT = cfg.nT
++
++    nL = cfg.nL # number of layers
++    vocab_size = get_vocab_size()
++
++    rnn = StackRNN(nHidden = nHidden, seqLen = nT, nLayers = nL, baseRNN = LSTM)
++
++    prevh = gen_init_prev(input, batch_size, rnn)
++
++    if cfg.cnn == 'caffenet':
++        n, cnn_output = caffenet.generate(n, image, cfg.cnn_output)
++    else:
++        n, cnn_output = vgg19.generate(n, image, cfg.cnn_output)
++
++    n.cnn = reshape(cnn_output, [batch_size, nT, cfg.cnn_output_dim])
++    n.icont = reshape(imask, [batch_size, nT])
++    n.embedi = hidden_param(n.cnn, rnn.inputSize, 'W_embedi', dropout = False, pdown = cfg.cnn_mode == 'fine-tune')
++
++    # encode the images
++    output, nexth = rnn.generate(n.embedi, n.icont, prevh, param_name = 'encoder')
++    for o in output:
++        sink_top(n, o)
++
++    attach_nexth(n, nexth, 'inter-%d')
++
++    # decode texts
++    n.embedx = embed(x, rnn.inputSize, vocab_size)
++    output, nexth = rnn.generate(n.embedx, xmask, nexth, param_name = 'decoder')
++
++    attach_nexth(n, nexth)
++    for idx, o in enumerate(output):
++        if idx != len(output) - rnn.nStateBase:
++            sink_top(n, o)
++    for h in nexth:
++        sink_top(n, h)
++
++    n.predict = hidden_param(output[-rnn.nStateBase], vocab_size, 'predict', dropout = False)
++
++    if y is not None:
++        n.loss = L.SoftmaxWithLoss(n.predict, y, softmax_param = {'axis':2}, loss_param = {'ignore_label':-1})
++
++    if acc:
++        n.top3 = L.Accuracy(n.predict, n.y, axis = 2, top_k = 3, ignore_label = -1)
++        n.top5 = L.Accuracy(n.predict, n.y, axis = 2, top_k = 5, ignore_label = -1)
++        n.top10 = L.Accuracy(n.predict, n.y, axis = 2, top_k = 10, ignore_label = -1)
++
++    return n.to_proto(net_name = "S2VT-V3", input = input)
++
++def gen_cnn():
++    n = NetSpec()
++
++    trans = get_trans_param()
++    input = []
++    batch_size = 20
++    image = gen_inputs(input, ['image'], [[batch_size, 3, trans['crop_size'], trans['crop_size']]])
++
++    if cfg.cnn == 'caffenet':
++        n, cnn_output = caffenet.generate(n, image, cfg.cnn_output)
++    else:
++        n, cnn_output = vgg19.generate(n, image, cfg.cnn_output)
++
++    return n.to_proto(net_name = "S2VT-V3-CNN", input = input), trans['mean_value']
++
++def gen_enc(rnn):
++    n = NetSpec()
++
++    batch_size = 1
++
++    input = []
++    image, imask = gen_inputs(input, ['image', 'imask'], [[1, 1, cfg.cnn_output_dim], [1,1]])
++    prevh = gen_init_prev(input, batch_size, rnn)
++
++    n.embedi = hidden_param(image, rnn.inputSize, 'W_embedi', dropout = False)
++
++    # encode the images
++    output, nexth = rnn.generate(n.embedi, imask, prevh, param_name = 'encoder')
++    attach_nexth(n, nexth)
++
++    return n.to_proto(net_name = "S2VT-V3-Encoder", input = input)
++
++def embed(input, nout, isize):
++
++    param = [{'name':'W_embedx'}]
++    param.append({'name':'B_embedx'})
++
++    configs = {}
++    configs['num_output'] = nout
++    configs['input_dim'] = isize
++    configs['bias_term'] = True
++    configs['param'] = param
++
++    configs['weight_filler'] = get_filler()
++
++    return L.Embed(input, **configs)
++
++def gen_dec(rnn, vocab_size):
++    n = NetSpec()
++    input = []
++    x, xmask = gen_inputs(input, ['x', 'xmask'], [[1,1], [1, 1]])
++    batch_size = 1
++
++    prevh = gen_init_prev(input, batch_size, rnn)
++
++    # decode texts
++    n.embedx = embed(x, rnn.inputSize, vocab_size)
++    output, nexth = rnn.generate(n.embedx, xmask, prevh, param_name = 'decoder')
++
++    attach_nexth(n, nexth)
++
++    n.predict = hidden_param(nexth[-rnn.nStateBase], vocab_size, 'predict', dropout = False)
++    return n.to_proto(net_name = "S2VT-V3-Decoder", input = input)
++
++
++def deploy(vocab_size):
++    rnn = StackRNN(nHidden = cfg.nHidden, seqLen = 1, nLayers = cfg.nL, baseRNN = LSTM)
++    return gen_enc(rnn), gen_dec(rnn, vocab_size), gen_cnn()
++
++def get_vocab_size():
++    return len(open(osp.join(data_dir, 'vocab')).readlines())
++
++def main(split):
++    nHidden = cfg.nHidden
++    nT = cfg.nT
++    nL = cfg.nL # number of layers
++    vocab_size = get_vocab_size()
++
++    if split == 'train':
++        return trainval(vocab_size, False)
++    elif split == 'val':
++        return trainval(vocab_size, True)
++    else:
++        return deploy(vocab_size)
++
++def get_trans_param():
++    if cfg.cnn == 'caffenet':
++        trans_param = {'mirror':True, 'crop_size':227, 'mean_value':[104, 117, 123]}
++    else:
++        trans_param = {'mirror':True, 'crop_size':224, 'mean_value':[103.939, 116.779, 123.68]}
++
++    return trans_param
++
++
++def trainval(vocab_size, acc):
++    n = NetSpec()
++    batch_size = cfg.batch_size
++
++    if acc:
++        source = osp.join(data_dir, 'val.txt.hdf5', 'fn.list')
++        imagelist = osp.join(data_dir, 'val.txt.lmdb')
++    else:
++        source = osp.join(data_dir, 'train.txt.hdf5', 'fn.list')
++        imagelist = osp.join(data_dir, 'train.txt.lmdb')
++
++    n.x, n.xmask, n.y = L.HDF5Data(source = source, batch_size = batch_size, ntop = 3)
++    n.image, n.imask = L.Data(source = imagelist, batch_size = batch_size * cfg.nT, ntop = 2, transform_param = get_trans_param(), backend = P.Data.LMDB)
++
++    input = []
++    return gen_net(n, input, n.image, n.imask, n.x, n.xmask, batch_size, y = n.y, acc = acc)
++
++if __name__ == "__main__":
++    import sys
++    from IPython.core import ultratb
++    sys.excepthook = ultratb.FormattedTB(call_pdb=True)
++
++    config_file = osp.join(data_dir, 'config.yaml')
++    if osp.exists(config_file):
++        cfg_from_file(config_file)
++
++    enc_net = osp.join(data_dir, 'encoder.prototxt')
++    dec_net = osp.join(data_dir, 'decoder.prototxt')
++    cnn_net = osp.join(data_dir, 'cnn.prototxt')
++    with open(enc_net, 'w') as enc_w, open(dec_net, 'w') as dec_w, open(cnn_net, 'w') as cnn_w:
++        enc, dec, cnn = main('deploy')
++        enc_w.write(str(enc))
++        dec_w.write(str(dec))
++        cnn_w.write(str(cnn[0]))
++
++        import numpy as np
++        np.save(osp.join(data_dir, 'cnn-mean.npy'), np.array(cnn[1]))
++
++    #sys.exit()
++
++    train_net = osp.join(data_dir, 'train.prototxt')
++    val_net = osp.join(data_dir, 'val.prototxt')
++    snapshot = osp.join(data_dir, 'model')
++
++    with open(train_net, 'w') as w:
++        w.write(str(main('train')))
++
++    with open(val_net, 'w') as w:
++        w.write(str(main('val')))
++
++    solver_path = osp.join(data_dir, 'solver.prototxt')
++
++    solver_in_path = osp.join(data_dir, 'solver.prototxt.in')
++    with open(solver_path, 'w') as w, open(solver_in_path) as r:
++        tpl = Template(r.read())
++        w.write(tpl.substitute(train_net = train_net, test_net = val_net, snapshot = snapshot))
++
++    print solver_path
++
++# vim: tabstop=8 expandtab shiftwidth=4 softtabstop=4
+diff --git a/models/RNN/CharRNN/sample.py b/models/RNN/CharRNN/sample.py
+new file mode 100644
+index 0000000..65a203c
+--- /dev/null
++++ b/models/RNN/CharRNN/sample.py
+@@ -0,0 +1,62 @@
++#!/usr/bin/env python
++
++"""
++Python source code - replace this with a description of the code and write the code below this text.
++"""
++
++import caffe
++import numpy as np
++import os.path as osp
++import random
++
++def softmax(x):
++    e_x = np.exp(x - np.max(x))
++    out = e_x / e_x.sum()
++    return out
++
++def sample(predict):
++    prob = softmax(predict)
++    return prob.cumsum().searchsorted(np.random.sample(1))
++
++def main():
++    import sys
++    model_def = sys.argv[1]
++    model = sys.argv[2]
++    data_dir = sys.argv[3]
++    vocab = []
++    with open(osp.join(data_dir, 'vocab')) as reader:
++        vocab = reader.read()
++
++    caffe.set_mode_cpu()
++    net = caffe.Net(model_def, model, caffe.TEST, True)
++
++    nState = len(net.inputs) - 2
++    prevhs = ['prevh-%d' % i for i in range(nState)]
++    nexths = ['nexth-%d' % i for i in range(nState)]
++    nHidden = net.blobs['prevh-0'].count
++
++    x = np.ones((1,1)) * 10
++    xmask = np.ones((1,1))
++
++    state = {n:np.zeros((1, 1, nHidden)) for n in prevhs}
++    input = {'x':x, 'xmask':xmask}
++
++    output = []
++
++    for i in range(10000):
++        realI = dict(input.items() + state.items())
++        out = net.forward_all(blobs = nexths, **realI)
++        x = sample(out['predict'].ravel())
++        for p, n in zip(prevhs, nexths):
++            state[p][...] = out[n][...]
++
++        input['x'][...] = x
++        output.append(vocab[x])
++
++    with open(osp.join(data_dir, 'samples'), 'w') as writer:
++        writer.write(''.join(output))
++
++if __name__ == "__main__":
++    main()
++
++# vim: tabstop=8 expandtab shiftwidth=4 softtabstop=4
+diff --git a/models/RNN/CharRNN/sample.sh b/models/RNN/CharRNN/sample.sh
+new file mode 100755
+index 0000000..4534e08
+--- /dev/null
++++ b/models/RNN/CharRNN/sample.sh
+@@ -0,0 +1,18 @@
++#!/bin/bash
++# vim ft=sh
++
++export PYTHONPATH=../../../python:$PYTHONPATH
++
++NARGS=$#
++
++if [ $NARGS != 1 ]
++then
++    echo $0 data-dir
++    exit
++fi
++
++data_dir=$1
++
++model=`ls -t $data_dir/*.caffemodel | head -1`
++
++python -u sample.py $data_dir/deploy.prototxt $model $data_dir |& tee $data_dir/log2
+diff --git a/models/RNN/CharRNN/train.sh b/models/RNN/CharRNN/train.sh
+new file mode 100755
+index 0000000..35adede
+--- /dev/null
++++ b/models/RNN/CharRNN/train.sh
+@@ -0,0 +1,18 @@
++#!/bin/bash
++# vim ft=sh
++
++export PYTHONPATH=../../../python:$PYTHONPATH
++
++NARGS=$#
++
++if [ $NARGS != 2 ]
++then
++    echo $0 data-dir gpu
++    exit
++fi
++
++data_dir=$1
++gpu=$2
++
++python char_rnn.py $data_dir
++../../../build/tools/caffe train -gpu $gpu -solver $data_dir/solver.prototxt |& tee $data_dir/log
+diff --git a/models/RNN/ID-MT/.gitignore b/models/RNN/ID-MT/.gitignore
+new file mode 100644
+index 0000000..ed9d095
+--- /dev/null
++++ b/models/RNN/ID-MT/.gitignore
+@@ -0,0 +1,3 @@
++input
++paraphrase
++.nfs*
+diff --git a/models/RNN/ID-MT/id-mt.py b/models/RNN/ID-MT/id-mt.py
+new file mode 100644
+index 0000000..5f392b3
+--- /dev/null
++++ b/models/RNN/ID-MT/id-mt.py
+@@ -0,0 +1,205 @@
++#!/usr/bin/env python
++
++"""
++Python source code - replace this with a description of the code and write the code below this text.
++"""
++from caffe import layers as L, params as P, NetSpec, Top as T
++from rnn import StackRNN, LSTM, dummy_input, hidden_param, get_filler, reshape, embed
++import os.path as osp
++from string import Template
++
++import sys; data_dir = sys.argv[1]
++
++sink_idx = 0
++def sink_top(n, top):
++    global sink_idx
++    sink_idx += 1
++    setattr(n, 'sink-%d' % sink_idx, L.Silence(top, ntop = 0))
++
++from config import cfg, cfg_from_file
++
++HidPattern = 'prevh-%d'
++nHidPattern = 'nexth-%d'
++
++def gen_init_prev(input, batch_size, rnn):
++    names = []
++    dims = []
++    sources = []
++    for i in range(rnn.nState):
++        names.append(HidPattern % i)
++        dims.append([batch_size, 1, rnn.nHidden])
++    return gen_inputs(input, names, dims, sources)
++
++def gen_inputs(inputs, names, dims, sources = None):
++    tops = []
++    if sources is None or len(sources) == 0:
++        sources = [None] * len(names)
++
++    for name, dim, source in zip(names, dims, sources):
++        inputs.append((name, dim, source))
++        tops.append(T(name, -1))
++    if len(names) == 1:
++        return tops[0]
++    else:
++        return tuple(tops)
++
++def attach_nexth(n, nexth, pat = None):
++
++    if pat is None:
++        pat = nHidPattern
++
++    for i in range(len(nexth)):
++        h = pat % i
++        setattr(n, h, nexth[i])
++
++def gen_net(n, input, x, xmask, batch_size, acc = False, y = None):
++
++    nHidden = cfg.nHidden
++    nT = cfg.nT
++
++    nL = cfg.nL # number of layers
++    vocab_size = get_vocab_size()
++
++    rnn = StackRNN(nHidden = nHidden, seqLen = nT, nLayers = nL, baseRNN = LSTM)
++
++    prevh = gen_init_prev(input, batch_size, rnn)
++
++    # embed the text
++    n.embedx = embed(x, rnn.inputSize, vocab_size)
++
++    # encode the text
++    # encoder param name don't mess up with image encoder name
++    output, nexth = rnn.generate(n.embedx, xmask, prevh, param_name = 't-encoder', reverse = True)
++    for o in output:
++        sink_top(n, o)
++
++    attach_nexth(n, nexth, 'inter-%d')
++
++    # decode texts
++    output, nexth = rnn.generate(n.embedx, xmask, nexth, param_name = 'decoder')
++
++    attach_nexth(n, nexth)
++    for idx, o in enumerate(output):
++        if idx != len(output) - rnn.nStateBase:
++            sink_top(n, o)
++    for h in nexth:
++        sink_top(n, h)
++
++    n.predict = hidden_param(output[-rnn.nStateBase], vocab_size, 'predict', dropout = False)
++
++    if y is not None:
++        n.loss = L.SoftmaxWithLoss(n.predict, y, softmax_param = {'axis':2}, loss_param = {'ignore_label':-1})
++
++    if acc:
++        n.top3 = L.Accuracy(n.predict, n.y, axis = 2, top_k = 3, ignore_label = -1)
++        n.top5 = L.Accuracy(n.predict, n.y, axis = 2, top_k = 5, ignore_label = -1)
++        n.top10 = L.Accuracy(n.predict, n.y, axis = 2, top_k = 10, ignore_label = -1)
++
++    return n.to_proto(net_name = "ID-MT", input = input)
++
++def gen_enc(rnn, vocab_size):
++    n = NetSpec()
++    input = []
++    x, xmask = gen_inputs(input, ['x', 'xmask'], [[1,1], [1, 1]])
++    batch_size = 1
++
++    prevh = gen_init_prev(input, batch_size, rnn)
++
++    # encode texts
++    n.embedx = embed(x, rnn.inputSize, vocab_size)
++
++    # encoder param name don't mess up with image encoder name
++    output, nexth = rnn.generate(n.embedx, xmask, prevh, param_name = 't-encoder', reverse = True)
++    attach_nexth(n, nexth)
++
++    return n.to_proto(net_name = "ID-MT-Encoder", input = input)
++
++def gen_dec(rnn, vocab_size):
++    n = NetSpec()
++    input = []
++    x, xmask = gen_inputs(input, ['x', 'xmask'], [[1,1], [1, 1]])
++    batch_size = 1
++
++    prevh = gen_init_prev(input, batch_size, rnn)
++
++    # decode texts
++    n.embedx = embed(x, rnn.inputSize, vocab_size)
++    output, nexth = rnn.generate(n.embedx, xmask, prevh, param_name = 'decoder')
++
++    attach_nexth(n, nexth)
++
++    n.predict = hidden_param(nexth[-rnn.nStateBase], vocab_size, 'predict', dropout = False)
++    return n.to_proto(net_name = "ID-MT-Decoder", input = input)
++
++def deploy(vocab_size):
++    rnn = StackRNN(nHidden = cfg.nHidden, seqLen = 1, nLayers = cfg.nL, baseRNN = LSTM)
++    return gen_enc(rnn, vocab_size), gen_dec(rnn, vocab_size)
++
++def get_vocab_size():
++    return len(open(osp.join(data_dir, 'vocab')).readlines())
++
++def main(split):
++    nHidden = cfg.nHidden
++    nT = cfg.nT
++    nL = cfg.nL # number of layers
++    vocab_size = get_vocab_size()
++
++    if split == 'train':
++        return trainval(vocab_size, False)
++    elif split == 'val':
++        return trainval(vocab_size, True)
++    else:
++        return deploy(vocab_size)
++
++def trainval(vocab_size, acc):
++    n = NetSpec()
++    batch_size = cfg.batch_size
++
++    if acc:
++        source = osp.join(data_dir, 'val.txt.hdf5', 'fn.list')
++    else:
++        source = osp.join(data_dir, 'train.txt.hdf5', 'fn.list')
++
++    n.x, n.xmask, n.y = L.HDF5Data(source = source, batch_size = batch_size, ntop = 3)
++
++    input = []
++    return gen_net(n, input, n.x, n.xmask, batch_size, y = n.y, acc = acc)
++
++if __name__ == "__main__":
++    import sys
++    from IPython.core import ultratb
++    sys.excepthook = ultratb.FormattedTB(call_pdb=True)
++
++    config_file = osp.join(data_dir, 'config.yaml')
++    if osp.exists(config_file):
++        cfg_from_file(config_file)
++
++    enc_net = osp.join(data_dir, 'encoder.prototxt')
++    dec_net = osp.join(data_dir, 'decoder.prototxt')
++    with open(enc_net, 'w') as enc_w, open(dec_net, 'w') as dec_w:
++        enc, dec = main('deploy')
++        enc_w.write(str(enc))
++        dec_w.write(str(dec))
++
++    #sys.exit()
++
++    train_net = osp.join(data_dir, 'train.prototxt')
++    val_net = osp.join(data_dir, 'val.prototxt')
++    snapshot = osp.join(data_dir, 'model')
++
++    with open(train_net, 'w') as w:
++        w.write(str(main('train')))
++
++    with open(val_net, 'w') as w:
++        w.write(str(main('val')))
++
++    solver_path = osp.join(data_dir, 'solver.prototxt')
++
++    solver_in_path = osp.join(data_dir, 'solver.prototxt.in')
++    with open(solver_path, 'w') as w, open(solver_in_path) as r:
++        tpl = Template(r.read())
++        w.write(tpl.substitute(train_net = train_net, test_net = val_net, snapshot = snapshot))
++
++    print solver_path
++
++# vim: tabstop=8 expandtab shiftwidth=4 softtabstop=4
+diff --git a/models/RNN/ID-MT/train.sh b/models/RNN/ID-MT/train.sh
+new file mode 100755
+index 0000000..c734317
+--- /dev/null
++++ b/models/RNN/ID-MT/train.sh
+@@ -0,0 +1,19 @@
++#!/bin/bash
++# vim ft=sh
++
++NARGS=$#
++
++if [ $NARGS != 2 ]
++then
++    echo $0 data-dir gpu
++    exit
++fi
++
++data_dir=$1
++gpu=$2
++
++export PYTHONPATH=../../../python:../S2VT-V3/:$PYTHONPATH
++
++caffe=../../../build/tools/caffe
++
++python id-mt.py $data_dir && $caffe train -gpu $gpu -solver $data_dir/solver.prototxt |& tee $data_dir/log
+diff --git a/models/RNN/README.md b/models/RNN/README.md
+new file mode 100644
+index 0000000..6e97aa6
+--- /dev/null
++++ b/models/RNN/README.md
+@@ -0,0 +1,63 @@
++## RNN Examples
++
++1. CharRNN: implementation of https://github.com/karpathy/char-rnn
++1. ID-MT: identity translation, or sentence autoencoder.
++1. VideoCaption: the scripts to train video captioning models
++1. coco-caption: the evaluation metric. with some improvment to handle multi processing than the original fork
++
++## Detailed Instructions
++1. Use `git clone --recursive` or `git submodule update --init --recursive` to get all submodules
++1. prepare dataset, such as LSMDC or TGIF
++1. generate thumbnails
++  1. refer ./gen-thumbs-core.sh to generate thumbnails for videos
++  1. refer to ./gen-thumbs-video.sh to generate thumbnails for animated GIFs
++1. ./VideoCaption/data/compile-data.sh to generate pkl files, which is used by ./VideoCaption/gen_data.sh
++1. ./VideoCaption/pipeline.sh  is the pipeline to train and eval the models
++1. ./VideoCaption/config.py contains all the configurations to control the model
++1. ./VideoCaption/configs/ contains the experiment configurations for Table 4 in the TGIF paper
++
++## Difference with BVLC/master
++
++### Update `data_transformer`
++support fine grain control of rand variables to achieve shared cropping
++
++1. **include/caffe/data_transformer.hpp** control rand variables to achieve shared cropping
++1. **src/caffe/test/test_data_transformer.cpp**
++1. **src/caffe/data_transformer.cpp**
++1. **src/caffe/layers/data_layer.cpp**
++
++### Copied from #2033
++Mostly direct copy. The `lstm_unit_layer` is updated to use batch size as the first axis.
++
++./VideoCaption/rnn.py is an example to use it
++
++1. **include/caffe/layers/eltwise_layer.hpp**
++1. **include/caffe/layers/lstm_unit_layer.hpp**
++1. **src/caffe/test/test_eltwise_layer.cpp**
++1. **src/caffe/test/test_lstm_unit_layer.cpp**
++1. **src/caffe/layers/eltwise_layer.cpp**
++1. **src/caffe/layers/eltwise_layer.cu**
++1. **src/caffe/layers/lstm_unit_layer.cpp**
++1. **src/caffe/layers/lstm_unit_layer.cu**
++
++### Temporal Cropping
++1. **include/caffe/tempo_crop_layer.hpp**
++1. **src/caffe/test/test_tempo_crop_layer.cpp**
++1. **src/caffe/layers/tempo_crop_layer.cpp**
++
++### Load variables by name
++Also avoid duplicated variable saving
++
++1. **src/caffe/net.cpp**
++1. **tools/caffe.cpp**
++1. **python/caffe/pycaffe.py**
++1. **python/caffe/test/test_solver.py**
++1. **python/caffe/_caffe.cpp**
++1. **python/caffe/classifier.py**
++
++### Misc
++
++1. **src/caffe/proto/caffe.proto** supporting the above changes
++1. **.gitmodules** include the coco-caption submodule for evaluation
++1. **python/caffe/__init__.py** expose Top to achieve zero top layer
++1. **python/caffe/net_spec.py** support zero top layer. network name. make it possible to export deploy network
+diff --git a/models/RNN/VideoCaption/.gitignore b/models/RNN/VideoCaption/.gitignore
+new file mode 100644
+index 0000000..bbb63ff
+--- /dev/null
++++ b/models/RNN/VideoCaption/.gitignore
+@@ -0,0 +1,3 @@
++input
++.nfs*
++*.log
+diff --git a/models/RNN/VideoCaption/caffenet.py b/models/RNN/VideoCaption/caffenet.py
+new file mode 100644
+index 0000000..63910f1
+--- /dev/null
++++ b/models/RNN/VideoCaption/caffenet.py
+@@ -0,0 +1,74 @@
++from caffe import layers as L, params as P, NetSpec, Top as T
++from config import cfg
++
++# helper function for common structures
++def gaussian_filler(std = 0.01):
++    return {'type':'gaussian', 'std':std}
++
++def get_name(name, part):
++    return '%s-%s-%s' % (cfg.cnn, part, name)
++
++def get_lr_param(name):
++    # the fine-tune and freezing should be dealt with by the propagate_down parameter
++
++    if cfg.cnn_mode == 'freeze':
++        param = [{'lr_mult':0}, {'lr_mult':0}]
++    elif cfg.cnn_mode == 'fine-tune':
++        param = [{'lr_mult':.1, 'decay_mult':.1}, {'lr_mult':.2, 'decay_mult':0}]
++    else:
++        raise "Unrecognized cnn_mode: %s" % cfg.cnn_mode
++
++    param[0]['name'] = get_name(name, 'W')
++    param[1]['name'] = get_name(name, 'b')
++
++    return param
++
++def conv_relu(bottom, ks, nout, stride=1, pad=0, group=1, name = 'n/a'):
++    conv = L.Convolution(bottom, kernel_size=ks, stride=stride,
++                                num_output=nout, pad=pad, group=group, weight_filler = gaussian_filler(), param = get_lr_param(name))
++
++    return conv, L.ReLU(conv, in_place=True)
++
++def max_pool(bottom, ks, stride=1):
++    return L.Pooling(bottom, pool=P.Pooling.MAX, kernel_size=ks, stride=stride)
++
++def hidden_param(bottom, num_output = 4096, name = 'n/a'):
++    fc = L.InnerProduct(bottom, num_output=num_output, weight_filler = gaussian_filler(0.005), param = get_lr_param(name))
++    relu = L.ReLU(fc, in_place = True)
++    drop = L.Dropout(relu, in_place=True, dropout_ratio = .5)
++    return fc, relu, drop
++
++
++def generate(n, input, output = 'fc7'):
++
++    # the net itself
++    n.conv1, n.relu1 = conv_relu(input, 11, 96, stride=4, name = 'conv1')
++    n.pool1 = max_pool(n.relu1, 3, stride=2)
++    n.norm1 = L.LRN(n.pool1, local_size=5, alpha=1e-4, beta=0.75)
++    n.conv2, n.relu2 = conv_relu(n.norm1, 5, 256, pad=2, group=2, name = 'conv2')
++    n.pool2 = max_pool(n.relu2, 3, stride=2)
++    n.norm2 = L.LRN(n.pool2, local_size=5, alpha=1e-4, beta=0.75)
++    n.conv3, n.relu3 = conv_relu(n.norm2, 3, 384, pad=1, name = 'conv3')
++    n.conv4, n.relu4 = conv_relu(n.relu3, 3, 384, pad=1, group=2, name = 'conv4')
++    n.conv5, n.relu5 = conv_relu(n.relu4, 3, 256, pad=1, group=2, name = 'conv5')
++    n.pool5 = max_pool(n.relu5, 3, stride=2)
++
++    n.fc6, n.relu6, n.drop6 = hidden_param(n.pool5, name = 'fc6')
++    if output == 'fc6':
++        return n, n.drop6
++
++    n.fc7, n.relu7, n.drop7 = hidden_param(n.drop6, name = 'fc7')
++    if output == 'fc7':
++        return n, n.drop7
++
++    n.fc8 = hidden_param(n.drop7, True, 1000, name = 'fc8')
++    return n, n.fc8
++
++def make_net():
++    n = NetSpec()
++    input = T('image', -1)
++    n, _ = generate(n, input)
++    print n.to_proto(net_name = "CaffeNet")
++
++if __name__ == '__main__':
++    make_net()
+diff --git a/models/RNN/VideoCaption/config.py b/models/RNN/VideoCaption/config.py
+new file mode 100644
+index 0000000..d1f12b8
+--- /dev/null
++++ b/models/RNN/VideoCaption/config.py
+@@ -0,0 +1,80 @@
++# --------------------------------------------------------
++# Copy from Fast-RCNN for the RNN code
++# --------------------------------------------------------
++
++import os
++import os.path as osp
++import numpy as np
++# `pip install easydict` if you don't have it
++from easydict import EasyDict as edict
++
++__C = edict()
++# Consumers can get config by:
++#   from fast_rcnn_config import cfg
++cfg = __C
++
++__C.nHidden = 100
++__C.nT = 40
++__C.nL = 1
++__C.batch_size = 8
++
++__C.cnn = 'caffenet'
++__C.cnn_mode = 'freeze' # freeze or fine-tune
++__C.cnn_output = 'fc7'
++__C.cnn_output_dim = 4096
++
++__C.decoder_mode = 'full-train'
++
++__C.new_height = 256
++__C.new_width = 256
++__C.dropout = .5
++__C.dropout2 = 0
++
++__C.max_len = 20
++__C.beam_size = 10
++__C.oversample = True
++
++__C.top_vocab = 2000
++__C.vocab_thre = -1
++__C.max_num_sentences = 80 # number of sentences to be saved in hdf5
++__C.caption_pattern = ''
++
++
++#global flags to control in the run time
++__C.global_lr = 'full-train'
++
++def _merge_a_into_b(a, b):
++    """Merge config dictionary a into config dictionary b, clobbering the
++    options in b whenever they are also specified in a.
++    """
++    if type(a) is not edict:
++        return
++
++    for k, v in a.iteritems():
++        # a must specify keys that are in b
++        if not b.has_key(k):
++            raise KeyError('{} is not a valid config key'.format(k))
++
++        # the types must match, too
++        if type(b[k]) is not type(v):
++            raise ValueError(('Type mismatch ({} vs. {}) '
++                              'for config key: {}').format(type(b[k]),
++                                                           type(v), k))
++
++        # recursively merge dicts
++        if type(v) is edict:
++            try:
++                _merge_a_into_b(a[k], b[k])
++            except:
++                print('Error under config key: {}'.format(k))
++                raise
++        else:
++            b[k] = v
++
++def cfg_from_file(filename):
++    """Load a config file and merge it into the default options."""
++    import yaml
++    with open(filename, 'r') as f:
++        yaml_cfg = edict(yaml.load(f))
++
++    _merge_a_into_b(yaml_cfg, __C)
+diff --git a/models/RNN/VideoCaption/configs/cubic.yaml b/models/RNN/VideoCaption/configs/cubic.yaml
+new file mode 100644
+index 0000000..5e9397d
+--- /dev/null
++++ b/models/RNN/VideoCaption/configs/cubic.yaml
+@@ -0,0 +1,22 @@
++
++batch_size: 8
++nL: 1
++output_length: 25
++
++tempo_len: 20
++share_crop: true
++
++nHidden: 500
++dropout: 0.0
++dropout2: 0.5
++cnn: caffenet
++cnn_output: fc7
++cnn_mode: 'freeze'
++top_vocab: -1
++max_num_sentences: 2
++caption_pattern: 'cf'
++
++#nT: 2
++#cnn_mode: freeze
++#batch_size: 8
++#pad: False
+diff --git a/models/RNN/VideoCaption/configs/finetune.yaml b/models/RNN/VideoCaption/configs/finetune.yaml
+new file mode 100644
+index 0000000..73b7e51
+--- /dev/null
++++ b/models/RNN/VideoCaption/configs/finetune.yaml
+@@ -0,0 +1,18 @@
++
++batch_size: 8
++nL: 1
++output_length: 25
++nHidden: 500
++dropout: 0.0
++dropout2: 0.5
++cnn: caffenet
++cnn_output: fc7
++cnn_mode: 'fine-tune'
++top_vocab: -1
++max_num_sentences: 2
++caption_pattern: 'cf'
++
++#nT: 2
++#cnn_mode: freeze
++#batch_size: 8
++#pad: False
+diff --git a/models/RNN/VideoCaption/configs/no-sp.yaml b/models/RNN/VideoCaption/configs/no-sp.yaml
+new file mode 100644
+index 0000000..9857590
+--- /dev/null
++++ b/models/RNN/VideoCaption/configs/no-sp.yaml
+@@ -0,0 +1,21 @@
++
++batch_size: 8
++nL: 1
++
++sp_crop: False
++
++output_length: 25
++nHidden: 500
++dropout: 0.0
++dropout2: 0.5
++cnn: caffenet
++cnn_output: fc7
++cnn_mode: 'freeze'
++top_vocab: -1
++max_num_sentences: 2
++caption_pattern: 'cf'
++
++#nT: 2
++#cnn_mode: freeze
++#batch_size: 8
++#pad: False
+diff --git a/models/RNN/VideoCaption/configs/rand.yaml b/models/RNN/VideoCaption/configs/rand.yaml
+new file mode 100644
+index 0000000..8f9df69
+--- /dev/null
++++ b/models/RNN/VideoCaption/configs/rand.yaml
+@@ -0,0 +1,19 @@
++
++# to achieve real random cnn, the `caffe train` should not have the `-weights cnn.caffemodel`
++batch_size: 8
++nL: 1
++output_length: 25
++nHidden: 500
++dropout: 0.0
++dropout2: 0.5
++cnn: caffenet
++cnn_output: fc7
++cnn_mode: 'freeze'
++top_vocab: -1
++max_num_sentences: 2
++caption_pattern: 'cf'
++
++#nT: 2
++#cnn_mode: freeze
++#batch_size: 8
++#pad: False
+diff --git a/models/RNN/VideoCaption/configs/s2vt.yaml b/models/RNN/VideoCaption/configs/s2vt.yaml
+new file mode 100644
+index 0000000..a6e8f9c
+--- /dev/null
++++ b/models/RNN/VideoCaption/configs/s2vt.yaml
+@@ -0,0 +1,21 @@
++
++batch_size: 8
++nL: 1
++output_length: 25
++nHidden: 500
++
++dropout: 0.0
++dropout2: 0.5
++
++cnn: caffenet
++cnn_output: fc7
++cnn_mode: 'freeze'
++top_vocab: -1
++
++max_num_sentences: 2
++caption_pattern: 'cf'
++
++#nT: 2
++#cnn_mode: freeze
++#batch_size: 8
++#pad: False
+diff --git a/models/RNN/VideoCaption/configs/single.yaml b/models/RNN/VideoCaption/configs/single.yaml
+new file mode 100644
+index 0000000..3f6d807
+--- /dev/null
++++ b/models/RNN/VideoCaption/configs/single.yaml
+@@ -0,0 +1,23 @@
++
++
++
++tempo_len: 1
++batch_size: 32
++
++nL: 1
++output_length: 25
++
++nHidden: 500
++dropout: 0.0
++dropout2: 0.5
++cnn: caffenet
++cnn_output: fc7
++cnn_mode: 'freeze'
++top_vocab: -1
++max_num_sentences: 2
++caption_pattern: 'cf'
++
++#nT: 2
++#cnn_mode: freeze
++#batch_size: 8
++#pad: False
+diff --git a/models/RNN/VideoCaption/configs/tempo.yaml b/models/RNN/VideoCaption/configs/tempo.yaml
+new file mode 100644
+index 0000000..6440c7b
+--- /dev/null
++++ b/models/RNN/VideoCaption/configs/tempo.yaml
+@@ -0,0 +1,22 @@
++
++
++tempo_len: 20
++share_crop: false
++
++batch_size: 16
++nL: 1
++output_length: 25
++nHidden: 500
++dropout: 0.0
++dropout2: 0.5
++cnn: caffenet
++cnn_output: fc7
++cnn_mode: 'freeze'
++top_vocab: -1
++max_num_sentences: 2
++caption_pattern: 'cf'
++
++#nT: 2
++#cnn_mode: freeze
++#batch_size: 8
++#pad: False
+diff --git a/models/RNN/VideoCaption/cvt_lmdb.sh b/models/RNN/VideoCaption/cvt_lmdb.sh
+new file mode 100755
+index 0000000..a70bd31
+--- /dev/null
++++ b/models/RNN/VideoCaption/cvt_lmdb.sh
+@@ -0,0 +1,13 @@
++#!/bin/bash
++# vim ft=sh
++
++data_dir=$1
++subset=$2
++save_dir=/dp/ycli-data/rnn-data/LSMDC/lmdb2/`echo $data_dir | tr / -`
++mkdir -p $save_dir
++lmdb=$save_dir/$subset-lmdb2
++rm $lmdb -Rf
++rm -f $data_dir/$subset.pkl.lmdb
++ln -s $lmdb $data_dir/$subset.pkl.lmdb
++
++../../../build/tools/convert_imageset --encoded --encode_type jpg --resize_height=256 --resize_width=256 '/' $data_dir/$subset.pkl.images $lmdb
+diff --git a/models/RNN/VideoCaption/data/.gitignore b/models/RNN/VideoCaption/data/.gitignore
+new file mode 100644
+index 0000000..addf825
+--- /dev/null
++++ b/models/RNN/VideoCaption/data/.gitignore
+@@ -0,0 +1,4 @@
++*
++!.gitignore
++!*.sh
++!*.py
+diff --git a/models/RNN/VideoCaption/data/compile-data.py b/models/RNN/VideoCaption/data/compile-data.py
+new file mode 100644
+index 0000000..4a4cd70
+--- /dev/null
++++ b/models/RNN/VideoCaption/data/compile-data.py
+@@ -0,0 +1,70 @@
++#!/usr/bin/env python
++
++"""
++Python source code - replace this with a description of the code and write the code below this text.
++"""
++import os.path as osp
++
++def path2key(path):
++    if 'thumbs' not in path:
++        # avi:
++        return osp.splitext(osp.basename(path))[0]
++    elif 'aligned' in path:
++        # eg: /homes/ycli/caffe-rnn/models/RNN/LSMDC/data/M-VAD-aligned/thumbs/3086_UGLY_TRUTH_01.01.03.400-01.01.04.543.avi-thumb/thumbnail_001_256x256.jpg
++        return osp.basename(osp.dirname(path))[:-10]
++    else:
++        return osp.dirname(path).split('@')[-1]
++
++def load_path_list(path):
++    res = []
++    with open(path) as reader:
++        for line in reader:
++            f = line.strip()
++            res.append((path2key(f), f))
++    return res
++
++def load_annos(path):
++    res = []
++    with open(path) as reader:
++        for line in reader:
++            fields = line.strip().split('\t')
++            res.append((fields[0], fields[-1]))
++    return res
++
++from collections import defaultdict
++def k2v(kv):
++    res = defaultdict(list)
++    for k, v in kv:
++        res[k].append(v)
++    return res
++
++def main():
++    import sys
++    #jpg_path = '/homes/ycli/data-bank/M-VAD-aligned/LSMDC/jpg-sample'
++    #avis_path = '/homes/ycli/data-bank/M-VAD-aligned/LSMDC/avis-sample'
++
++    jpg_path = '/homes/ycli/data-bank/M-VAD-aligned/LSMDC/jpg'
++    avis_path = '/homes/ycli/data-bank/M-VAD-aligned/LSMDC/avis'
++
++    anno_path = sys.argv[1]
++    save_path = sys.argv[2]
++
++    jpgs = k2v(load_path_list(jpg_path))
++    avis = k2v(load_path_list(avis_path))
++    annos = k2v(load_annos(anno_path))
++
++    db = {}
++    for k in annos:
++        if k in jpgs and k in avis:
++            db[k] = (avis[k], sorted(jpgs[k]), annos[k])
++
++    import cPickle
++    with open(save_path, 'w') as writer:
++        cPickle.dump(db, writer)
++
++    pass
++
++if __name__ == "__main__":
++    main()
++
++# vim: tabstop=8 expandtab shiftwidth=4 softtabstop=4
+diff --git a/models/RNN/VideoCaption/data/compile-data.sh b/models/RNN/VideoCaption/data/compile-data.sh
+new file mode 100755
+index 0000000..535a4a2
+--- /dev/null
++++ b/models/RNN/VideoCaption/data/compile-data.sh
+@@ -0,0 +1,7 @@
++#!/bin/bash
++# vim ft=sh
++
++python compile-data.py ./LSMDC15_annos_test.csv ./LSMDC/test.pkl
++python compile-data.py ./LSMDC15_annos_val.csv ./LSMDC/val.pkl
++python compile-data.py ./LSMDC15_annos_training.csv ./LSMDC/train.pkl
++python compile-data.py ./LSMDC15_annos_all.csv ./LSMDC/all.pkl
+diff --git a/models/RNN/VideoCaption/dummy.jpg b/models/RNN/VideoCaption/dummy.jpg
+new file mode 100644
+index 0000000000000000000000000000000000000000..aae6f5a1ef1bcb31abf4340913b0da2f7b225499
+GIT binary patch
+literal 339
+zcmex=<NpH&0WUXCHwH#V1_nkTWcYuZ!I^=Bjg6g+m4ls~os*M;i${c)hnt&6Qb?Fz
+zL{>^(PF6}rMnOeST|r4lSw=>~TvNxu(8R<<Uft5x!pKI?*u?1n0S0ak1`!4kMn*w~
+z|3?_)frhg(f&l{*FfuW-u(GjpaB^`26>Jq?U}9uuW@2GxWo2Ojs;&jfGq4D<3Mm>o
+zvIz$!vMUve7&T5@$f4}C@t|nX#SbdRNkvVZTw>x9l2WQ_>Kd9_CZ=ZQ7M51dF0O9w
+z9-dyoA)#U65s^{JDXD4c8JStdC8cHM6_r)ZEv;?s9i3g1CQq3<ZTgIvvlcC0vUJ(<
+z6)RV5+Pr1!w(UE1?mBe%$kAiRPn<k;>GGAU*RJ2VdF$b$$4{O<d;a3(tB;>PfBE|D
+b`;VW${@-HY00o;p!_R+R8jFBv|Nol+&G&9-
+
+literal 0
+HcmV?d00001
+
+diff --git a/models/RNN/VideoCaption/eval.py b/models/RNN/VideoCaption/eval.py
+new file mode 100644
+index 0000000..1ae8f3e
+--- /dev/null
++++ b/models/RNN/VideoCaption/eval.py
+@@ -0,0 +1,78 @@
++from tokenizer.ptbtokenizer import PTBTokenizer
++from bleu.bleu import Bleu
++from meteor.meteor import Meteor
++from rouge.rouge import Rouge
++from cider.cider import Cider
++
++from sampler import load_video
++from collections import defaultdict
++
++def to_coco(kvs, keys):
++    res = defaultdict(list)
++    for k in keys:
++        clist = kvs[k]
++        for c in clist:
++            res[k].append({'caption':c})
++
++    return res
++
++def main():
++    """docstring for main"""
++
++    import sys
++    gt_path = sys.argv[1]
++    res_path = sys.argv[2]
++
++    gts = load_video(gt_path)
++    res = load_video(res_path)
++
++    res_single = {}
++    for k, v in res.items():
++        res_single[k] = [v[0]]
++
++    # =================================================
++    # Convert to COCO format
++    # =================================================
++    gts = to_coco(gts, res_single.keys())
++    res = to_coco(res_single, res_single.keys())
++
++    # =================================================
++    # Set up scorers
++    # =================================================
++    print 'tokenization...'
++    tokenizer = PTBTokenizer()
++    gts  = tokenizer.tokenize(gts)
++    res = tokenizer.tokenize(res)
++
++    # =================================================
++    # Set up scorers
++    # =================================================
++    print 'setting up scorers...'
++    scorers = [
++        #(Bleu(4), ["Bleu_1", "Bleu_2", "Bleu_3", "Bleu_4"]),
++        (Meteor(),"METEOR"),
++        #(Rouge(), "ROUGE_L"),
++        #(Cider(), "CIDEr")
++    ]
++
++    # =================================================
++    # Compute scores
++    # =================================================
++    eval = {}
++    for scorer, method in scorers:
++        print 'computing %s score...'%(scorer.method())
++        score, scores = scorer.compute_score(gts, res)
++        if type(method) == list:
++            for sc, scs, m in zip(score, scores, method):
++                print "%s: %0.3f"%(m, sc)
++        else:
++            print "%s: %0.3f"%(method, score)
++
++if __name__ == "__main__":
++    import sys
++    from IPython.core import ultratb
++    sys.excepthook = ultratb.FormattedTB(call_pdb=True)
++    main()
++
++
++# vim: tabstop=8 expandtab shiftwidth=4 softtabstop=4
+diff --git a/models/RNN/VideoCaption/eval.sh b/models/RNN/VideoCaption/eval.sh
+new file mode 100755
+index 0000000..b62b4f3
+--- /dev/null
++++ b/models/RNN/VideoCaption/eval.sh
+@@ -0,0 +1,15 @@
++#!/bin/bash
++# vim ft=sh
++
++export PYTHONPATH='../coco-caption/pycocoevalcap/':$PYTHONPATH
++#data_dir='./input/YouTube2text/faster/'
++#data_dir='./input/YouTube2text/fine-tune/'
++#subset=train
++#subset=test
++data_dir=$1
++subset=$2
++
++gt_path=$data_dir/$subset.pkl.captions
++res_path=`ls $data_dir/$subset.pkl.images2.*.sent -t | head -1`
++
++python eval.py $gt_path $res_path
+diff --git a/models/RNN/VideoCaption/gen_data.sh b/models/RNN/VideoCaption/gen_data.sh
+new file mode 100755
+index 0000000..7d1048f
+--- /dev/null
++++ b/models/RNN/VideoCaption/gen_data.sh
+@@ -0,0 +1,24 @@
++#!/bin/bash
++# vim ft=sh
++
++export PYTHONPATH=../../../python:$PYTHONPATH
++NARGS=$#
++
++if [ $NARGS != 1 ]
++then
++    echo $0 data-dir
++    exit
++fi
++
++data_dir=$1
++
++if [ -f $data_dir/vocab ]
++then
++    echo remove $data_dir/vocab manually
++    exit
++fi
++
++python -u video_seq_data.py $data_dir/all.pkl vocab
++python -u video_seq_data.py $data_dir/train.pkl
++python -u video_seq_data.py $data_dir/val.pkl
++python -u video_seq_data.py $data_dir/test.pkl vocab
+diff --git a/models/RNN/VideoCaption/gen_data_s2.sh b/models/RNN/VideoCaption/gen_data_s2.sh
+new file mode 100755
+index 0000000..5e08838
+--- /dev/null
++++ b/models/RNN/VideoCaption/gen_data_s2.sh
+@@ -0,0 +1,16 @@
++#!/bin/bash
++# vim ft=sh
++
++NARGS=$#
++
++if [ $NARGS != 1 ]
++then
++    echo $0 data-dir
++    exit
++fi
++
++data_dir=$1
++
++# should be on working machine (gpu7 YT, gpu1 M-VAD, gpu2, gpu3)
++./cvt_lmdb.sh $data_dir train
++./cvt_lmdb.sh $data_dir val
+diff --git a/models/RNN/VideoCaption/heapdict.py b/models/RNN/VideoCaption/heapdict.py
+new file mode 100644
+index 0000000..9f834bd
+--- /dev/null
++++ b/models/RNN/VideoCaption/heapdict.py
+@@ -0,0 +1,110 @@
++import collections
++
++def doc(s):
++    if hasattr(s, '__call__'):
++        s = s.__doc__
++    def f(g):
++        g.__doc__ = s
++        return g
++    return f
++
++class heapdict(collections.MutableMapping):
++    __marker = object()
++
++    @staticmethod
++    def _parent(i):
++        return ((i - 1) >> 1)
++
++    @staticmethod
++    def _left(i):
++        return ((i << 1) + 1)
++
++    @staticmethod
++    def _right(i):
++        return ((i+1) << 1)    
++    
++    def __init__(self, *args, **kw):
++        self.heap = []
++        self.d = {}
++        self.update(*args, **kw)
++
++    @doc(dict.clear)
++    def clear(self):
++        self.heap.clear()
++        self.d.clear()
++
++    @doc(dict.__setitem__)
++    def __setitem__(self, key, value):
++        if key in self.d:
++            self.pop(key)
++        wrapper = [value, key, len(self)]
++        self.d[key] = wrapper
++        self.heap.append(wrapper)
++        self._decrease_key(len(self.heap)-1)
++
++    def _min_heapify(self, i):
++        l = self._left(i)
++        r = self._right(i)
++        n = len(self.heap)
++        if l < n and self.heap[l][0] < self.heap[i][0]:
++            low = l
++        else:
++            low = i
++        if r < n and self.heap[r][0] < self.heap[low][0]:
++            low = r
++
++        if low != i:
++            self._swap(i, low)
++            self._min_heapify(low)
++
++    def _decrease_key(self, i):
++        while i:
++            parent = self._parent(i)
++            if self.heap[parent][0] < self.heap[i][0]: break
++            self._swap(i, parent)
++            i = parent
++
++    def _swap(self, i, j):
++        self.heap[i], self.heap[j] = self.heap[j], self.heap[i]
++        self.heap[i][2] = i
++        self.heap[j][2] = j
++
++    @doc(dict.__delitem__)
++    def __delitem__(self, key):
++        wrapper = self.d[key]
++        while wrapper[2]:
++            parentpos = self._parent(wrapper[2])
++            parent = self.heap[parentpos]
++            self._swap(wrapper[2], parent[2])
++        self.popitem()
++
++    @doc(dict.__getitem__)
++    def __getitem__(self, key):
++        return self.d[key][0]
++
++    @doc(dict.__iter__)
++    def __iter__(self):
++        return iter(self.d)
++
++    def popitem(self):
++        """D.popitem() -> (k, v), remove and return the (key, value) pair with lowest\nvalue; but raise KeyError if D is empty."""
++        wrapper = self.heap[0]
++        if len(self.heap) == 1:
++            self.heap.pop()
++        else:
++            self.heap[0] = self.heap.pop(-1)
++            self.heap[0][2] = 0
++            self._min_heapify(0)
++        del self.d[wrapper[1]]
++        return wrapper[1], wrapper[0]    
++
++    @doc(dict.__len__)
++    def __len__(self):
++        return len(self.d)
++
++    def peekitem(self):
++        """D.peekitem() -> (k, v), return the (key, value) pair with lowest value;\n but raise KeyError if D is empty."""
++        return (self.heap[0][1], self.heap[0][0])
++
++del doc
++__all__ = ['heapdict']
+diff --git a/models/RNN/VideoCaption/pipeline.sh b/models/RNN/VideoCaption/pipeline.sh
+new file mode 100755
+index 0000000..671bbc5
+--- /dev/null
++++ b/models/RNN/VideoCaption/pipeline.sh
+@@ -0,0 +1,21 @@
++#!/bin/bash
++# vim ft=sh
++NARGS=$#
++
++if [ $NARGS != 2 ]
++then
++    echo $0 data-dir gpu
++    exit
++fi
++
++data_dir=$1
++gpu=$2
++
++
++# assume the pkl files have been created by ./data/compile-data.sh
++./gen_data.sh $data_dir
++./gen_data_s2.sh $data_dir
++./train.sh $data_dir $gpu
++./sample_grid.sh $data_dir $gpu
++
++python ~/fast-rcnn/email_notify.py "$0 $1 Done"
+diff --git a/models/RNN/VideoCaption/rnn.py b/models/RNN/VideoCaption/rnn.py
+new file mode 100644
+index 0000000..8e8c7d7
+--- /dev/null
++++ b/models/RNN/VideoCaption/rnn.py
+@@ -0,0 +1,274 @@
++#!/usr/bin/env python
++from caffe import layers as L, params as P, NetSpec
++from caffe.proto import caffe_pb2
++from config import cfg
++
++def reshape(input, new_shape):
++    shape = caffe_pb2.BlobShape()
++    shape.dim.extend(new_shape)
++    return L.Reshape(input, shape = shape)
++
++def dummy_input(shapes):
++    bshapes = []
++    for shape in shapes:
++        bshape = caffe_pb2.BlobShape()
++        bshape.dim.extend(shape)
++        bshapes.append(bshape)
++    return L.DummyData(shape = bshapes, ntop = len(shapes))
++
++def get_filler():
++    return {'type':'uniform', 'min':-0.08, 'max':0.08}
++
++# lr: 'freeze', 'finetune', 'full train'
++def set_lr(params, lr):
++
++    if lr == 'freeze':
++        lr_mult = [0, 0]
++        decay_mult = [0, 0] # doesn't matter
++    elif lr == 'fine-tune':
++        lr_mult = [.1, .2]
++        decay_mult = [.1, 0]
++    elif lr == 'full-train':
++        lr_mult = [1, 1]
++        decay_mult = [1, 1]
++    else:
++        raise Exception("Unrecognized lr mode: %s. freeze, fine-tune, full-train" % lr)
++
++    for i, param in enumerate(params):
++        param['lr_mult'] = lr_mult[i]
++        param['decay_mult'] = decay_mult[i]
++
++def embed(input, nout, isize):
++
++    param = [{'name':'W_embedx'}]
++    param.append({'name':'B_embedx'})
++    set_lr(param, cfg.global_lr)
++
++    configs = {}
++    configs['num_output'] = nout
++    configs['input_dim'] = isize
++    configs['bias_term'] = True
++    configs['param'] = param
++
++    configs['weight_filler'] = get_filler()
++
++    return L.Embed(input, **configs)
++
++def hidden_param(bottom, num_output, name, bias_term = True, axis = 2, dropout = True, pdown = None):
++
++    params = [{'name': 'W_' + name}]
++    if bias_term:
++        params.append({'name':'B_' + name})
++
++    set_lr(params, cfg.global_lr)
++
++    configs = {}
++    configs['num_output'] = num_output
++    configs['bias_term'] = bias_term
++    configs['axis'] = axis
++    configs['param'] = params
++    configs['weight_filler'] = get_filler()
++
++    if pdown is not None:
++        configs['propagate_down'] = [pdown]
++
++    fc = L.InnerProduct(bottom, **configs)
++
++    if cfg.dropout > 0 and dropout:
++        fc = L.Dropout(fc, in_place = True, dropout_ratio = cfg.dropout)
++
++    return fc
++
++class RNN(object):
++    """Basic RNN Layers"""
++    def __init__(self, nHidden, seqLen):
++        self.nHidden = nHidden
++        self.seqLen = seqLen
++        self.nState = 1
++        self.inputSize = nHidden
++
++    def check_hidden(self, hid):
++        assert len(hid) == self.nState, "Number of hidden states are wrong"
++
++    # prevh: is a list of [N * nHidden]
++    def core_rnn(self, xi, ci, prevh, static, param_name):
++        self.check_hidden(prevh)
++
++        h = prevh[0]
++
++        hcont = L.Eltwise(h, ci, operation = P.Eltwise.SUM, coeff_blob = True)
++        Whm1 = hidden_param(hcont, self.inputSize, 'h2h' + param_name, bias_term = False)
++        if static:
++            Combine = L.Eltwise(xi, Whm1, static, operation = P.Eltwise.SUM)
++        else:
++            Combine = L.Eltwise(xi, Whm1, operation = P.Eltwise.SUM)
++
++        nexth = L.Tanh(Combine)
++        return [nexth]
++
++    def _slicing(self, target):
++        if type(target) is not list:
++            if self.seqLen > 1:
++                return L.Slice(target, ntop = self.seqLen)
++            else:
++                return (target, )
++        else:
++            res = [[] for _ in range(self.seqLen)]
++            for t in target:
++                s = self._slicing(t)
++                for r, si in zip(res, s):
++                    r.append(si)
++            return res
++
++    def generate(self, input, cont, prevh, static = None, param_name = "", reverse = False):
++        SlicedX = self._slicing(input)
++        SlicedC = self._slicing(cont)
++
++        O = [[] for i in range(self.nState)]
++
++        ilist = range(self.seqLen)
++        if reverse:
++            ilist = reversed(ilist)
++
++        for i in ilist:
++            prevh = self.core_rnn(SlicedX[i], SlicedC[i], prevh, static, param_name)
++            for o, h in zip(O, prevh):
++                o.append(h)
++
++        realO = []
++
++        for o in O:
++            if self.seqLen > 1:
++                if reverse:
++                    o = list(reversed(o))
++                realO.append(L.Concat(*o))
++            else:
++                realO.append(L.Split(o[0]))
++
++        return realO, prevh
++
++class LSTM(RNN):
++    """override the core_rnn method"""
++    def __init__(self, nHidden, seqLen):
++        super(LSTM, self).__init__(nHidden, seqLen)
++        self.nState = 2
++        self.inputSize = nHidden * 4
++
++    # prevh: is a list of [N * nHidden]
++    def core_rnn(self, xi, ci, prevh, static, param_name):
++        self.check_hidden(prevh)
++
++        h = prevh[0]
++        prevc = prevh[1]
++
++        hcont = L.Eltwise(h, ci, operation = P.Eltwise.SUM, coeff_blob = True)
++        Whm1 = hidden_param(hcont, self.inputSize, 'h2h' + param_name, bias_term = False)
++        if static:
++            Combine = L.Eltwise(xi, Whm1, static, operation = P.Eltwise.SUM)
++        else:
++            Combine = L.Eltwise(xi, Whm1, operation = P.Eltwise.SUM)
++
++        nextc, nexth = L.LSTMUnit(prevc, Combine, ci, ntop = 2)
++        return [nexth, nextc]
++
++class MultiRNN(RNN):
++    """docstring for MultiRNN: support multiple input. one layer for each input"""
++    def __init__(self, nHidden, seqLen, nInput, baseRNN, clearStatic = True):
++        super(MultiRNN, self).__init__(nHidden, seqLen)
++
++        self.baseRNN = baseRNN(nHidden, -1)
++        self.nInput = nInput
++        self.nStateBase = self.baseRNN.nState
++        self.nState = self.nInput * self.nStateBase
++        self.inputSize = self.baseRNN.inputSize
++        self.clearStatic = clearStatic
++
++    def check_input(self, input):
++        assert type(input) is list, "input must be a list"
++        assert len(input) == self.nInput, "input size does not match"
++
++    def core_rnn(self, xi, ci, prevh, static, param_name):
++        self.check_hidden(prevh)
++        self.check_input(xi)
++
++        nexth = []
++
++        Xi = xi[0]
++
++        for i in range(self.nInput):
++            prevh_i = prevh[i*self.nStateBase:(i + 1)*self.nStateBase]
++            nexth_i = self.baseRNN.core_rnn(Xi, ci, prevh_i, static, '-ml%d' % i + param_name)
++
++            if i != self.nInput - 1:
++                Xii = hidden_param(nexth_i[0], self.inputSize, 'o%di' % i + param_name)
++                Xi = L.Eltwise(Xii, xi[i + 1], operation = P.Eltwise.SUM)
++
++            nexth.extend(nexth_i)
++
++            if self.clearStatic:
++                static = None
++
++        return nexth
++
++
++class StackRNN(RNN):
++    """connect multiple layers"""
++    """
++    clearStatic: whether clear static after the first layer
++    TODO: make heteogeious baseRNN possible
++    ASSUMPTION: assuming only the first hidden state goes to the next layer, following states are auxilliary states
++    """
++    def __init__(self, nHidden, seqLen, nLayers, baseRNN, clearStatic = True):
++        super(StackRNN, self).__init__(nHidden, seqLen)
++
++        self.baseRNN = baseRNN(nHidden, -1)
++        self.nLayers = nLayers
++        self.nStateBase = self.baseRNN.nState
++        self.clearStatic = clearStatic
++
++        self.nState = nLayers * self.nStateBase
++        self.inputSize = self.baseRNN.inputSize
++
++    def core_rnn(self, xi, ci, prevh, static, param_name):
++        self.check_hidden(prevh)
++
++        nexth = []
++
++        for i in range(self.nLayers):
++            prevh_i = prevh[i*self.nStateBase:(i + 1)*self.nStateBase]
++            nexth_i = self.baseRNN.core_rnn(xi, ci, prevh_i, static, '-l%d' % i + param_name)
++            xi = hidden_param(nexth_i[0], self.inputSize, 'o%di' % i + param_name)
++
++            nexth.extend(nexth_i)
++
++            if self.clearStatic:
++                static = None
++
++        return nexth
++
++def main():
++
++    test_cases = {'rnn':RNN(nHidden = 1000, seqLen = 20), 'lstm':LSTM(nHidden = 1000, seqLen = 20), 'stack-rnn':StackRNN(nHidden = 1000, seqLen = 20, baseRNN = RNN, nLayers = 10), 'stack-lstm':StackRNN(nHidden = 1000, seqLen = 20, baseRNN = LSTM, nLayers = 10)}
++
++    for name, rnn in test_cases.items():
++        n = NetSpec()
++        n.input, n.cont, n.prevh, n.static = L.Data(source = "", ntop = 4)
++        prevh = [n.prevh] * rnn.nState
++        output, prevh = rnn.generate(n.input, n.cont, prevh, static = n.static)
++        for i in range(len(output)):
++                setattr(n, 'o-%d' % i, output[i])
++                setattr(n, 'h-%d' % i, prevh[i])
++
++        with open('test/%s.prototxt' % name, 'w') as f:
++            f.write(str(n.to_proto(name = 'RNN-Net')))
++
++    pass
++
++if __name__ == "__main__":
++
++    import sys
++    from IPython.core import ultratb
++    sys.excepthook = ultratb.FormattedTB(call_pdb=True)
++    main()
++
++# vim: tabstop=8 expandtab shiftwidth=4 softtabstop=4
+diff --git a/models/RNN/VideoCaption/s2vt.py b/models/RNN/VideoCaption/s2vt.py
+new file mode 100644
+index 0000000..90eaeb2
+--- /dev/null
++++ b/models/RNN/VideoCaption/s2vt.py
+@@ -0,0 +1,255 @@
++#!/usr/bin/env python
++
++"""
++Python source code - replace this with a description of the code and write the code below this text.
++"""
++from caffe import layers as L, params as P, NetSpec, Top as T
++from rnn import StackRNN, LSTM, dummy_input, hidden_param, get_filler, reshape, embed
++import os.path as osp
++from string import Template
++
++import sys; data_dir = sys.argv[1]
++import caffenet
++import vgg19
++
++sink_idx = 0
++def sink_top(n, top):
++    global sink_idx
++    sink_idx += 1
++    setattr(n, 'sink-%d' % sink_idx, L.Silence(top, ntop = 0))
++
++from config import cfg, cfg_from_file
++
++HidPattern = 'prevh-%d'
++nHidPattern = 'nexth-%d'
++
++def gen_init_prev(input, batch_size, rnn):
++    names = []
++    dims = []
++    sources = []
++    for i in range(rnn.nState):
++        names.append(HidPattern % i)
++        dims.append([batch_size, 1, rnn.nHidden])
++    return gen_inputs(input, names, dims, sources)
++
++def gen_inputs(inputs, names, dims, sources = None):
++    tops = []
++    if sources is None or len(sources) == 0:
++        sources = [None] * len(names)
++
++    for name, dim, source in zip(names, dims, sources):
++        inputs.append((name, dim, source))
++        tops.append(T(name, -1))
++    if len(names) == 1:
++        return tops[0]
++    else:
++        return tuple(tops)
++
++def attach_nexth(n, nexth, pat = None):
++
++    if pat is None:
++        pat = nHidPattern
++
++    for i in range(len(nexth)):
++        h = pat % i
++        setattr(n, h, nexth[i])
++
++def gen_net(n, input, image, imask, x, xmask, batch_size, acc = False, y = None):
++
++    nHidden = cfg.nHidden
++    nT = cfg.nT
++
++    nL = cfg.nL # number of layers
++    vocab_size = get_vocab_size()
++
++    rnn = StackRNN(nHidden = nHidden, seqLen = nT, nLayers = nL, baseRNN = LSTM)
++
++    prevh = gen_init_prev(input, batch_size, rnn)
++
++    if cfg.cnn == 'caffenet':
++        n, cnn_output = caffenet.generate(n, image, cfg.cnn_output)
++    else:
++        n, cnn_output = vgg19.generate(n, image, cfg.cnn_output)
++
++    n.cnn = reshape(cnn_output, [batch_size, nT, cfg.cnn_output_dim])
++    n.icont = reshape(imask, [batch_size, nT])
++    n.embedi = hidden_param(n.cnn, rnn.inputSize, 'W_embedi', dropout = False, pdown = cfg.cnn_mode == 'fine-tune')
++
++    # encode the images
++    output, nexth = rnn.generate(n.embedi, n.icont, prevh, param_name = 'encoder')
++    for o in output:
++        sink_top(n, o)
++
++    attach_nexth(n, nexth, 'inter-%d')
++
++    # decode texts
++    tmp_lr = cfg.global_lr
++    cfg.global_lr = cfg.decoder_mode
++    n.embedx = embed(x, rnn.inputSize, vocab_size)
++    output, nexth = rnn.generate(n.embedx, xmask, nexth, param_name = 'decoder')
++
++    if cfg.dropout2 > 0:
++        pre_predict = L.Dropout(output[-rnn.nStateBase], in_place = True, dropout_ratio = cfg.dropout)
++    else:
++        pre_predict = output[-rnn.nStateBase]
++    n.predict = hidden_param(pre_predict, vocab_size, 'predict', dropout = False)
++
++    cfg.global_lr = tmp_lr
++
++    attach_nexth(n, nexth)
++    for idx, o in enumerate(output):
++        if idx != len(output) - rnn.nStateBase:
++            sink_top(n, o)
++    for h in nexth:
++        sink_top(n, h)
++
++
++    if y is not None:
++        n.loss = L.SoftmaxWithLoss(n.predict, y, softmax_param = {'axis':2}, loss_param = {'ignore_label':-1})
++
++    if acc:
++        n.top3 = L.Accuracy(n.predict, n.y, axis = 2, top_k = 3, ignore_label = -1)
++        n.top5 = L.Accuracy(n.predict, n.y, axis = 2, top_k = 5, ignore_label = -1)
++        n.top10 = L.Accuracy(n.predict, n.y, axis = 2, top_k = 10, ignore_label = -1)
++
++    return n.to_proto(net_name = "S2VT-V3", input = input)
++
++def gen_cnn():
++    n = NetSpec()
++
++    trans = get_trans_param()
++    input = []
++    batch_size = 20
++    image = gen_inputs(input, ['image'], [[batch_size, 3, trans['crop_size'], trans['crop_size']]])
++
++    if cfg.cnn == 'caffenet':
++        n, cnn_output = caffenet.generate(n, image, cfg.cnn_output)
++    else:
++        n, cnn_output = vgg19.generate(n, image, cfg.cnn_output)
++
++    return n.to_proto(net_name = "S2VT-V3-CNN", input = input), trans['mean_value']
++
++def gen_enc(rnn):
++    n = NetSpec()
++
++    batch_size = 1
++
++    input = []
++    image, imask = gen_inputs(input, ['image', 'imask'], [[1, 1, cfg.cnn_output_dim], [1,1]])
++    prevh = gen_init_prev(input, batch_size, rnn)
++
++    n.embedi = hidden_param(image, rnn.inputSize, 'W_embedi', dropout = False)
++
++    # encode the images
++    output, nexth = rnn.generate(n.embedi, imask, prevh, param_name = 'encoder')
++    attach_nexth(n, nexth)
++
++    return n.to_proto(net_name = "S2VT-V3-Encoder", input = input)
++
++def gen_dec(rnn, vocab_size):
++    n = NetSpec()
++    input = []
++    x, xmask = gen_inputs(input, ['x', 'xmask'], [[1,1], [1, 1]])
++    batch_size = 1
++
++    prevh = gen_init_prev(input, batch_size, rnn)
++
++    # decode texts
++    n.embedx = embed(x, rnn.inputSize, vocab_size)
++    output, nexth = rnn.generate(n.embedx, xmask, prevh, param_name = 'decoder')
++
++    attach_nexth(n, nexth)
++
++    n.predict = hidden_param(nexth[-rnn.nStateBase], vocab_size, 'predict', dropout = False)
++    return n.to_proto(net_name = "S2VT-V3-Decoder", input = input)
++
++
++def deploy(vocab_size):
++    rnn = StackRNN(nHidden = cfg.nHidden, seqLen = 1, nLayers = cfg.nL, baseRNN = LSTM)
++    return gen_enc(rnn), gen_dec(rnn, vocab_size), gen_cnn()
++
++def get_vocab_size():
++    return len(open(osp.join(data_dir, 'vocab')).readlines())
++
++def main(split):
++    nHidden = cfg.nHidden
++    nT = cfg.nT
++    nL = cfg.nL # number of layers
++    vocab_size = get_vocab_size()
++
++    if split == 'train':
++        return trainval(vocab_size, False)
++    elif split == 'val':
++        return trainval(vocab_size, True)
++    else:
++        return deploy(vocab_size)
++
++def get_trans_param():
++    if cfg.cnn == 'caffenet':
++        trans_param = {'mirror':True, 'crop_size':227, 'mean_value':[104, 117, 123]}
++    else:
++        trans_param = {'mirror':True, 'crop_size':224, 'mean_value':[103.939, 116.779, 123.68]}
++
++    return trans_param
++
++
++def trainval(vocab_size, acc):
++    n = NetSpec()
++    batch_size = cfg.batch_size
++
++    if acc:
++        source = osp.join(data_dir, 'val.pkl.hdf5', 'fn.list')
++        imagelist = osp.join(data_dir, 'val.pkl.lmdb')
++    else:
++        source = osp.join(data_dir, 'train.pkl.hdf5', 'fn.list')
++        imagelist = osp.join(data_dir, 'train.pkl.lmdb')
++
++    n.x, n.xmask, n.y = L.HDF5Data(source = source, batch_size = batch_size, ntop = 3)
++    n.image, n.imask = L.Data(source = imagelist, batch_size = batch_size * cfg.nT, ntop = 2, transform_param = get_trans_param(), backend = P.Data.LMDB)
++
++    input = []
++    return gen_net(n, input, n.image, n.imask, n.x, n.xmask, batch_size, y = n.y, acc = acc)
++
++if __name__ == "__main__":
++    import sys
++    from IPython.core import ultratb
++    sys.excepthook = ultratb.FormattedTB(call_pdb=True)
++
++    config_file = osp.join(data_dir, 'config.yaml')
++    if osp.exists(config_file):
++        cfg_from_file(config_file)
++
++    enc_net = osp.join(data_dir, 'encoder.prototxt')
++    dec_net = osp.join(data_dir, 'decoder.prototxt')
++    cnn_net = osp.join(data_dir, 'cnn.prototxt')
++    with open(enc_net, 'w') as enc_w, open(dec_net, 'w') as dec_w, open(cnn_net, 'w') as cnn_w:
++        enc, dec, cnn = main('deploy')
++        enc_w.write(str(enc))
++        dec_w.write(str(dec))
++        cnn_w.write(str(cnn[0]))
++
++        import numpy as np
++        np.save(osp.join(data_dir, 'cnn-mean.npy'), np.array(cnn[1]))
++
++    #sys.exit()
++
++    train_net = osp.join(data_dir, 'train.prototxt')
++    val_net = osp.join(data_dir, 'val.prototxt')
++    snapshot = osp.join(data_dir, 'model')
++
++    with open(train_net, 'w') as w:
++        w.write(str(main('train')))
++
++    with open(val_net, 'w') as w:
++        w.write(str(main('val')))
++
++    solver_path = osp.join(data_dir, 'solver.prototxt')
++
++    solver_in_path = osp.join(data_dir, 'solver.prototxt.in')
++    with open(solver_path, 'w') as w, open(solver_in_path) as r:
++        tpl = Template(r.read())
++        w.write(tpl.substitute(train_net = train_net, test_net = val_net, snapshot = snapshot))
++
++    print solver_path
++
++# vim: tabstop=8 expandtab shiftwidth=4 softtabstop=4
+diff --git a/models/RNN/VideoCaption/sample.sh b/models/RNN/VideoCaption/sample.sh
+new file mode 100755
+index 0000000..f77b849
+--- /dev/null
++++ b/models/RNN/VideoCaption/sample.sh
+@@ -0,0 +1,26 @@
++#!/bin/bash
++# vim ft=sh
++
++export PYTHONPATH='/homes/ycli/caffe-rnn/models/RNN/coco-caption/pycocoevalcap/':'/homes/ycli/caffe-rnn/python/':$PYTHONPATH
++
++NARGS=$#
++
++if [ $NARGS != 2 ]
++then
++    echo $0 data-dir gpu
++    exit
++fi
++
++data_dir=$1
++gpu=$2
++
++model=`ls -t $data_dir/model*.caffemodel | head -1`
++
++subset=test
++gdb --args python -u sampler.py $model $data_dir $data_dir/$subset.pkl.images2 $gpu |& tee $data_dir/log2
++exit
++./eval.sh $data_dir $subset
++
++python ~/fast-rcnn/email_notify.py "$0 $1 Done"
++
++ #|& tee $data_dir/log2
+diff --git a/models/RNN/VideoCaption/sample_grid.sh b/models/RNN/VideoCaption/sample_grid.sh
+new file mode 100755
+index 0000000..c22d913
+--- /dev/null
++++ b/models/RNN/VideoCaption/sample_grid.sh
+@@ -0,0 +1,25 @@
++#!/bin/bash
++# vim ft=sh
++
++export PYTHONPATH='/homes/ycli/caffe-rnn/models/RNN/coco-caption/pycocoevalcap/':'/homes/ycli/caffe-rnn/python/':$PYTHONPATH
++
++NARGS=$#
++
++if [ $NARGS != 2 ]
++then
++    echo $0 data-dir gpu
++    exit
++fi
++
++data_dir=$1
++gpu=$2
++
++subset=test
++res_path=$data_dir/grid-res
++gt_path=$data_dir/$subset.pkl.captions
++
++ls $data_dir/model*.caffemodel | xargs -L 1 -I {} sh -c "python -u sampler.py {} $data_dir $data_dir/$subset.pkl.images2 $gpu $cnn_dir || :"
++ls $data_dir/$subset.pkl.images2.*.sent > $res_path
++ls $data_dir/$subset.pkl.images2.*.sent | xargs -L 1 -I {} python eval.py $gt_path {} | tee -a $res_path
++
++ #|& tee $data_dir/log2
+diff --git a/models/RNN/VideoCaption/sampler.py b/models/RNN/VideoCaption/sampler.py
+new file mode 100644
+index 0000000..f71aab5
+--- /dev/null
++++ b/models/RNN/VideoCaption/sampler.py
+@@ -0,0 +1,334 @@
++#!/usr/bin/env python
++
++"""
++Python source code - replace this with a description of the code and write the code below this text.
++"""
++
++from collections import defaultdict
++
++def softmax(x, T = 1.0):
++    x = x / T
++    e_x = np.exp(x - np.max(x))
++    out = e_x / e_x.sum()
++    return out
++
++def load_video(image_path):
++    video = defaultdict(list)
++    with open(image_path) as reader:
++        for line in reader:
++            fields = line.strip().split('\t')
++            video[fields[0]].append(fields[1])
++    return video
++
++def crop(img):
++    crop_dims = np.array([227, 227])
++    image_dims = np.array([256, 256])
++
++    center = np.array(image_dims) / 2.0
++    crop = np.tile(center, (1, 2))[0] + np.concatenate([
++        -crop_dims / 2.0,
++        crop_dims / 2.0
++    ])
++    return img[:, crop[0]:crop[2], crop[1]:crop[3]]
++
++
++class BeamV0(object):
++    """docstring for Beam"""
++    def __init__(self, beam_size):
++        super(Beam, self).__init__()
++        self.beam = []
++        self.beam_size = beam_size
++
++    def __iter__(self):
++        return iter(self.beam)
++
++    def push(self, item):
++        if len(self.beam) >= self.beam_size:
++            if self.beam[0] < item:
++                heapq.heappop(self.beam)
++            else:
++                return
++        heapq.heappush(self.beam, item)
++
++    def find(self, w):
++        fbeam = [b for b in self.beam if b[2] == w]
++        if fbeam:
++            return max(fbeam)
++        else:
++            return None
++
++from heapdict import heapdict
++class Beam(object):
++    """docstring for Beam"""
++    def __init__(self, beam_size):
++        super(Beam, self).__init__()
++        self.beam = heapdict()
++        self.beam_size = beam_size
++
++    def __iter__(self):
++        for k in self.beam:
++            yield self.beam[k]
++
++    def push(self, item):
++        if len(self.beam) >= self.beam_size:
++            if self.beam.peekitem()[1] < item:
++                self.beam.popitem()
++            else:
++                return
++        self.beam[item[2]] = item
++
++    def find(self, w):
++        if w in self.beam:
++            return self.beam[w]
++        else:
++            return None
++
++class CNNLoader(object):
++    """docstring for CNNLoader"""
++    def __init__(self, data_dir):
++        super(CNNLoader, self).__init__()
++        self.data_dir = data_dir
++        self._load_cnn()
++
++    def _load_cnn(self):
++        self.images = open(osp.join(self.data_dir, '%s-output-imgs.pkl' % cfg.cnn)).read().split('\n')
++        self.image_ind = {img:idx for idx, img in enumerate(self.images)}
++        self.feat = np.load(osp.join(self.data_dir, '%s-output-%s.npy' % (cfg.cnn, cfg.cnn_output)))
++
++    def load(self, imgs):
++        idx = [self.image_ind[i] for i in imgs]
++        return self.feat[idx, :]
++
++
++class CNNExtractor(object):
++    """docstring for CNNExtractor"""
++    def __init__(self, model, model_def, mean_path, oversample = True):
++        # setup cnn
++        self.mean = np.load(mean_path)
++        self.cnn = caffe.Classifier(model_def, model, image_dims = [256,256], mean = self.mean, raw_scale = 255.0, channel_swap = [2,1,0], output_blobs = [cfg.cnn_output], weights_by_name = True)
++        self.oversample = oversample
++
++    def load(self, images):
++        inputs = [caffe.io.load_image(im_f) for im_f in images]
++        predictions = self.cnn.predict(inputs, self.oversample)
++        return predictions[cfg.cnn_output]
++
++class Sampler(object):
++    """docstring for Sampler"""
++    def __init__(self, model_def, model, vocab = None, beam_size = 10, max_len = 100):
++        self.net = caffe.Net(model_def, model, caffe.TEST, True)
++        self.vocab = vocab
++
++        if vocab:
++            self.vocab_ind = dict([(word, idx) for idx, word in enumerate(vocab)])
++        self._beam_size = beam_size
++        self._max_len = max_len
++
++        # setup hidden states
++        # input, input-mask
++        self.nState = len(self.net.inputs) - 2
++        self.prevhs = ['prevh-%d' % i for i in range(self.nState)]
++        self.nexths = ['nexth-%d' % i for i in range(self.nState)]
++        self.nHidden = self.net.blobs[self.prevhs[0]].count
++
++        # setup x and xmask
++        self.x_name = self.net.inputs[0]
++        self.mask_name = self.net.inputs[1]
++
++        self.x = np.zeros(self.net.blobs[self.x_name].data.shape)
++        self.mask = np.ones((1,1))
++        self.input = {self.x_name:self.x, self.mask_name:self.mask}
++
++    def reset(self, state = None):
++        # reset state
++        for n in self.prevhs:
++            if state:
++                self.net.blobs[n].data[...] = state[n]
++            else:
++                self.net.blobs[n].data[...] = 0
++
++    def _snapshot(self):
++        state = {}
++        for p, n in zip(self.prevhs, self.nexths):
++            state[p] = self.net.blobs[n].data.copy()
++        return state
++
++    def _connect_prev_next(self):
++        for p, n in zip(self.prevhs, self.nexths):
++            self.net.blobs[p].data[...] = self.net.blobs[n].data
++
++    def forward_all(self, input):
++        self.reset()
++        #import ipdb; ipdb.set_trace()
++        for i in range(len(input)):
++            self.input[self.x_name][...] = input[i, ]
++            self.net.forward(**self.input)
++            self._connect_prev_next()
++
++        return self._snapshot()
++
++    def step(self, prev, state):
++        self.input[self.x_name][...] = prev
++        self.reset(state)
++        out = self.net.forward(**self.input)
++        out = out['predict'].ravel()
++        return softmax(out), self._snapshot()
++
++    def _sample_prob(self, prob, use_argmax = False):
++        if use_argmax:
++            return np.argmax(prob)
++        prob = prob.cumsum()
++        res = prob.searchsorted(np.random.sample(1))
++        return res
++
++    def greedy(self, state):
++        return self.sample(state, True)
++
++    def sample(self, state, argmax = False):
++
++        words = []
++
++        prev = self.vocab_ind[BOS]
++        for _ in range(20):
++            out, state = self.step(prev, state)
++            prev = self._sample_prob(out, argmax)
++            words.append(self.vocab[prev])
++
++            if prev == self.vocab_ind[EOS]:
++                break
++
++        return [(words, 1)]
++
++    def beam_search(self, state):
++
++        beam_size = self._beam_size
++        beam = Beam(beam_size)
++        beam.push((0, None, self.vocab_ind[BOS], state))
++        prev_beam = beam
++
++        endpoints = []
++
++        for i in range(self._max_len):
++            beam = Beam(beam_size)
++
++            for bstate in prev_beam:
++                score, _, prev, state = bstate
++                if prev == self.vocab_ind[EOS]:
++                    continue
++                pred, state = self.step(prev, state)
++                for w, ps in enumerate(pred):
++                    # running average
++                    cur_score = (np.log(ps) + score * i) / ( i + 1.0)
++                    beam.push((cur_score, bstate, w, state))
++
++            prev_beam = beam
++
++            eos = beam.find(self.vocab_ind[EOS])
++
++            if eos:
++                endpoints.append(eos)
++                beam_size -= 1
++                if beam_size == 0:
++                    break
++            #print i, beam_size
++
++        # exhausted length, keep everything in beam
++        if eos is None:
++            endpoints.extend(beam)
++
++        #prev = max(endpoint)
++        all_words = []
++
++        for prev in endpoints:
++
++            score = prev[0]
++
++            words = []
++            while prev[1]:
++                words.append(self.vocab[prev[2]])
++                prev = prev[1]
++
++            all_words.append((list(reversed(words)), score))
++
++        return all_words
++
++def load_lm():
++
++    lm_path = '/homes/ycli/ycli-data/LM/google-1b.lm.bin'
++    if osp.exists(lm_path) and False:
++        import kenlm
++        print 'loading lm:', lm_path
++        ## too slow, should setup server to do this
++        model = kenlm.LanguageModel(lm_path)
++        return lambda sent: model.score(sent)
++    else:
++        return lambda sent: -len(sent)
++
++def main():
++    import sys
++    model = sys.argv[1]
++    data_dir = sys.argv[2]
++    image_path = sys.argv[3]
++    gpu = int(sys.argv[4])
++
++    videos = load_video(image_path)
++
++    config_file = osp.join(data_dir, 'config.yaml')
++    if osp.exists(config_file):
++        cfg_from_file(config_file)
++
++    vocab = []
++    with open(osp.join(data_dir, 'vocab')) as reader:
++        for line in reader:
++            vocab.append(line.strip())
++
++    if gpu >= 0:
++        caffe.set_mode_gpu()
++        caffe.set_device(gpu)
++    else:
++        caffe.set_mode_cpu()
++
++    extractor = CNNExtractor(model, osp.join(data_dir, 'cnn.prototxt'), osp.join(data_dir, 'cnn-mean.npy'))
++
++    lm = load_lm()
++    #extractor = CNNLoader(cnn_dir)
++    encoder = Sampler(osp.join(data_dir, 'encoder.prototxt'), model)
++    decoder = Sampler(osp.join(data_dir, 'decoder.prototxt'), model, vocab, max_len = cfg.max_len, beam_size = cfg.beam_size)
++
++    sentences = {}
++
++    for vname, images in videos.items():
++        print vname
++        cnn = extractor.load(images)
++        state = encoder.forward_all(cnn)
++        #sents = decoder.beam_search(state)
++        #sents = decoder.sample(state)
++        sents = decoder.greedy(state)
++        sentences[vname] = sents
++
++    m_name = osp.basename(model)
++
++    with open(image_path + '.' + m_name + '.sent', 'w') as writer:
++        for vname, sents in sentences.items():
++            sents.sort(key = lambda x:-x[1])
++            for idx, (words, score) in enumerate(sents):
++                writer.write('%s\t%s\t%02d@%g\n' % (vname, ' '.join(words), idx, score))
++
++if __name__ == "__main__":
++    import sys
++    from IPython.core import ultratb
++    sys.excepthook = ultratb.FormattedTB(call_pdb=True)
++
++    import caffe
++    import numpy as np
++    import os.path as osp
++    import random
++    from config import cfg, cfg_from_file
++
++    from video_seq_data import BOS, EOS, UNK
++
++    import heapq
++
++    main()
++
++# vim: tabstop=8 expandtab shiftwidth=4 softtabstop=4
+diff --git a/models/RNN/VideoCaption/train.sh b/models/RNN/VideoCaption/train.sh
+new file mode 100755
+index 0000000..343cbd7
+--- /dev/null
++++ b/models/RNN/VideoCaption/train.sh
+@@ -0,0 +1,20 @@
++#!/bin/bash
++# vim ft=sh
++
++NARGS=$#
++
++if [ $NARGS != 2 ]
++then
++    echo $0 data-dir gpu
++    exit
++fi
++
++data_dir=$1
++gpu=$2
++
++export PYTHONPATH=../../../python:$PYTHONPATH
++
++weight=$data_dir/cnn.caffemodel
++caffe=../../../build/tools/caffe
++
++python s2vt.py $data_dir && $caffe train -weights $weight -gpu $gpu -solver $data_dir/solver.prototxt |& tee $data_dir/log
+diff --git a/models/RNN/VideoCaption/vgg19.py b/models/RNN/VideoCaption/vgg19.py
+new file mode 100644
+index 0000000..713d1f2
+--- /dev/null
++++ b/models/RNN/VideoCaption/vgg19.py
+@@ -0,0 +1,63 @@
++#!/usr/bin/env python
++
++"""
++Python source code - replace this with a description of the code and write the code below this text.
++"""
++
++from caffenet import conv_relu, max_pool, hidden_param
++
++def multi_conv(n, bottom, nout, Indice, Nconv, no_pool = False):
++
++
++    prev_conv = bottom
++    for i in range(Nconv):
++        name = '%d_%d' % (Indice, i + 1)
++        conv, relu = conv_relu(prev_conv, 3, nout, pad = 1, name = 'conv%s' % name)
++        setattr(n, 'conv%s' % name, conv)
++        setattr(n, 'relu%s' % name, relu)
++        prev_conv = conv
++
++    if no_pool:
++        return n, Indice + 1, prev_conv
++    else:
++        setattr(n, 'pool%d' % Indice, max_pool(prev_conv, 2, 2))
++        return n, Indice + 1, getattr(n, 'pool%d' % Indice)
++
++
++def generate(n, data, output = 'conv5'):
++
++    idx = 1
++
++    n, idx, prev = multi_conv(n, data, 64, idx, 2)
++    n, idx, prev = multi_conv(n, prev, 128, idx, 2)
++    n, idx, prev = multi_conv(n, prev, 256, idx, 4)
++    n, idx, prev = multi_conv(n, prev, 512, idx, 4)
++
++    if output == 'conv5':
++        n, idx, prev = multi_conv(n, prev, 512, idx, 4, no_pool = True)
++        return n, prev
++
++    n, idx, prev = multi_conv(n, prev, 512, idx, 4)
++
++    if output == 'pool5':
++        return n, n.pool5
++
++    n.fc6, n.relu6, n.drop6 = hidden_param(n.pool5, name = 'fc6')
++    if output == 'fc6':
++        return n, n.drop6
++
++    n.fc7, n.relu7, n.drop7 = hidden_param(n.drop6, name = 'fc7')
++    if output == 'fc7':
++        return n, n.drop7
++
++    n.fc8 = hidden_param(n.drop7, True, 1000, name = 'fc8')
++    return n, n.fc8
++
++def main():
++
++    pass
++
++if __name__ == "__main__":
++    main()
++
++# vim: tabstop=8 expandtab shiftwidth=4 softtabstop=4
+diff --git a/models/RNN/VideoCaption/video_seq_data.py b/models/RNN/VideoCaption/video_seq_data.py
+new file mode 100644
+index 0000000..9b65b14
+--- /dev/null
++++ b/models/RNN/VideoCaption/video_seq_data.py
+@@ -0,0 +1,236 @@
++#!/usr/bin/env python
++
++"""
++Python source code - replace this with a description of the code and write the code below this text.
++"""
++import os
++import sys
++import os.path as osp
++from config import cfg, cfg_from_file
++import numpy as np
++import random
++import re, string
++
++from collections import defaultdict
++
++import h5py
++
++NUM = 'NUM'
++UNK = 'UNK'
++BOS = '<BOS>'
++EOS = '.'
++this_dir = osp.realpath(osp.dirname(__file__))
++dummy_path = osp.join(this_dir, 'dummy.jpg')
++
++# those must be in the vocabulary
++SP_CHARS = [NUM, UNK, BOS, EOS]
++
++def clean_text(caption, max_len):
++
++    # lower the caption
++    caption = caption.lower()
++
++    # remove non printable words (non ascii)
++    caption = filter(lambda x: x in string.printable, caption)
++
++    # replace number only words with NUM
++    caption = re.sub(r'\b\d+\b', NUM, caption)
++
++    # remove punctuations
++    caption = re.sub('([%s])' % re.escape(string.punctuation), ' ', caption)
++
++    words = caption.split()
++    #append a '.' sign as the end of setence
++
++    words = words[:(max_len - 1)]
++    words.append(EOS)
++
++    return words
++
++def load_data(pkl_path):
++    import cPickle
++    return cPickle.load(open(pkl_path))
++
++def permute_to_length(target, L):
++    # random permute targer to the exact L
++    # if shorter than L, duplicate will happen
++    # if longer than L, cut up will happen
++    if len(target) == 0:
++        raise Exception("can't take len0 target")
++    A = list(target)
++    res = []
++    while len(res) < L:
++        random.shuffle(A)
++        res.extend(A)
++
++    return res[:L]
++
++def main():
++    import sys
++    from collections import Counter
++
++    data_path = sys.argv[1]
++
++    vocab_only = False
++    if len(sys.argv) > 2 and sys.argv[2] == 'vocab':
++        vocab_only = True
++
++    data_dir = osp.dirname(data_path)
++    dataset_name = osp.basename(data_dir)
++
++    config_file = osp.join(data_dir, 'config.yaml')
++    if osp.exists(config_file):
++        cfg_from_file(config_file)
++
++    save_dir = data_dir
++    save_base = data_path
++
++    nT = cfg.nT
++
++    raw_data = load_data(data_path)
++
++    data = []
++    words = Counter()
++    with open(osp.join(save_base + '.images2'), 'w') as writer, \
++            open(osp.join(save_base + '.captions') ,'w') as caption_writer, \
++            open(osp.join(save_base + '.captions2') ,'w') as caption2_writer:
++
++        for clip, (_, clip_thumbs, clip_captions) in raw_data.items():
++            # handle thumbs
++            for t in clip_thumbs:
++                writer.write('%s\t%s\n' % (clip, t))
++
++            thumbs = clip_thumbs[:nT]
++
++            # handle captions
++            uniq_set = set()
++            captions = []
++
++            for caption in clip_captions:
++                if caption in uniq_set:
++                    continue
++
++                uniq_set.add(caption)
++
++                caption_writer.write(('%s\t%s\n' % (clip, caption)).encode('utf-8'))
++                capts = [caption]
++
++                for capt in capts:
++                    words_i = clean_text(capt, nT)
++                    words.update(words_i)
++                    captions.append(words_i)
++
++            if len(captions) == 0:
++                import ipdb; ipdb.set_trace()
++                print clip
++                continue
++
++            for caption in captions:
++                caption2_writer.write(('%s\t%s\n' % (clip, ' '.join(caption))).encode('utf-8'))
++            captions = permute_to_length(captions, cfg.max_num_sentences)
++            data.append((thumbs, captions))
++
++    vocab_path = osp.join(save_dir, 'vocab')
++    vocab = []
++    if osp.exists(vocab_path):
++        with open(vocab_path) as reader:
++            for line in reader:
++                vocab.append(line.strip())
++    else:
++        words = sorted(words.items(), key = lambda x:-x[1])
++        if cfg.vocab_thre > 0:
++            words = filter(lambda x:x[1] > cfg.vocab_thre, words)
++
++        if cfg.top_vocab > 0:
++            words = words[:cfg.top_vocab]
++
++        for word, cnt in words:
++            vocab.append(word)
++
++        for char in SP_CHARS:
++            if char not in set(vocab):
++                vocab.insert(0, char)
++
++        with open(vocab_path, 'w') as writer:
++            for word in vocab:
++                writer.write(word + '\n')
++
++    if vocab_only:
++        return
++
++    vocab = dict([(w, idx) for idx, w in enumerate(vocab)])
++
++    random.shuffle(data)
++
++    lenx = len(data) * cfg.max_num_sentences
++    x = np.ones((lenx, nT), 'float32') * vocab[EOS]
++    xmask = np.zeros((lenx, nT), 'float32')
++    y = np.ones((lenx, nT), 'float32') * -1.0
++
++    # save image list
++    with open(data_path + '.images', 'w') as writer:
++        for thumbs, _ in data:
++
++            images = []
++            for t in reversed(thumbs):
++                images.append((t, 1))
++
++            for i in range(len(thumbs), nT):
++                images.append((dummy_path, 0))
++
++            for i, f in reversed(images):
++                writer.write('%s\t%d\n' % (i, f))
++
++    # save encoded words hdf5
++    idx = 0
++    for i in range(cfg.max_num_sentences):
++        for _, captions in data:
++            words = captions[i]
++            vec = map(lambda x: vocab[x] if x in vocab else vocab[UNK], words)
++            y[idx, :len(vec)] = vec
++            x[idx, 1:len(vec)] = vec[:-1]
++            x[idx, 0] = vocab[BOS]
++            xmask[idx, :len(vec)] = 1
++            idx += 1
++
++    save_hdf5(range(lenx), save_base + '.hdf5',  x = x, y = y, xmask = xmask)
++    pass
++
++def batch(iterable, n = 1):
++   l = len(iterable)
++   for ndx in range(0, l, n):
++       yield iterable[ndx:min(ndx+n, l)]
++
++def save_hdf5(idx, save_dir, **kwargs):
++    batch_size = 10000
++
++    if not osp.exists(save_dir):
++        os.makedirs(save_dir)
++
++    output_path_list = []
++
++    total = len(list(batch(idx, batch_size)))
++
++    for ii, bi in enumerate(batch(idx, batch_size)):
++        print 'save_hdf5', ii, total
++
++        output_path = osp.join(save_dir, 'data-%d.h5' % ii)
++        output_path_list.append(output_path)
++
++        with h5py.File(output_path) as f:
++            for name, val in kwargs.items():
++                f[name] = val[bi, ]
++
++    with open(osp.join(save_dir, 'fn.list'), 'w') as f:
++        for output_path in output_path_list:
++            f.write(output_path + '\n')
++
++    print save_dir, len(idx)
++
++if __name__ == "__main__":
++    import sys
++    from IPython.core import ultratb
++    sys.excepthook = ultratb.FormattedTB(call_pdb=True)
++    main()
++
++# vim: tabstop=8 expandtab shiftwidth=4 softtabstop=4
+diff --git a/models/RNN/coco-caption b/models/RNN/coco-caption
+new file mode 160000
+index 0000000..2a35c44
+--- /dev/null
++++ b/models/RNN/coco-caption
+@@ -0,0 +1 @@
++Subproject commit 2a35c44c09b8c4dbda7cee1f63a3bb35534904f0
+diff --git a/models/RNN/gen-thumbs-gif.sh b/models/RNN/gen-thumbs-gif.sh
+new file mode 100755
+index 0000000..0bcc368
+--- /dev/null
++++ b/models/RNN/gen-thumbs-gif.sh
+@@ -0,0 +1,6 @@
++#!/bin/bash
++# vim ft=sh
++
++echo convert gif to jpgs
++export MAGICK_THREAD_LIMIT=1
++cat gif_list_path | xargs -P 4 -L 1 -I {} convert {} -coalesce -set filename:m_s '%wx%h-%T' {}-%04d-%[filename:m_s].jpg
+diff --git a/models/RNN/gen-thumbs-video.sh b/models/RNN/gen-thumbs-video.sh
+new file mode 100755
+index 0000000..b01c7a0
+--- /dev/null
++++ b/models/RNN/gen-thumbs-video.sh
+@@ -0,0 +1,8 @@
++#!/bin/bash
++# vim ft=sh
++
++video_path=$1
++intv=$2
++save_base=$3
++
++ffmpeg -y -threads 1 -i "$video_path" -vf "select=not(mod(n\, $intv))" -vsync vfr $save_base/thumbnail_%03d_256x256.jpg
+diff --git a/python/caffe/__init__.py b/python/caffe/__init__.py
+index e2881b8..74cee56 100644
+--- a/python/caffe/__init__.py
++++ b/python/caffe/__init__.py
+@@ -5,4 +5,4 @@ from .proto.caffe_pb2 import TRAIN, TEST
+ from .classifier import Classifier
+ from .detector import Detector
+ from . import io
+-from .net_spec import layers, params, NetSpec, to_proto
++from .net_spec import layers, params, NetSpec, to_proto, Top
+diff --git a/python/caffe/_caffe.cpp b/python/caffe/_caffe.cpp
+index a2c46a1..f7478fd 100644
+--- a/python/caffe/_caffe.cpp
++++ b/python/caffe/_caffe.cpp
+@@ -84,6 +84,19 @@ shared_ptr<Net<Dtype> > Net_Init(
+ }
+ 
+ // Net construct-and-load convenience constructor
++shared_ptr<Net<Dtype> > Net_Init_Load_Name(
++    string param_file, string pretrained_param_file, int phase, bool byname = false) {
++  CheckFile(param_file);
++  CheckFile(pretrained_param_file);
++
++  shared_ptr<Net<Dtype> > net(new Net<Dtype>(param_file,
++      static_cast<Phase>(phase)));
++  net->CopyTrainedLayersFrom(pretrained_param_file, byname);
++  return net;
++}
++
++
++// Net construct-and-load convenience constructor
+ shared_ptr<Net<Dtype> > Net_Init_Load(
+     string param_file, string pretrained_param_file, int phase) {
+   CheckFile(param_file);
+@@ -226,11 +239,12 @@ BOOST_PYTHON_MODULE(_caffe) {
+     bp::no_init)
+     .def("__init__", bp::make_constructor(&Net_Init))
+     .def("__init__", bp::make_constructor(&Net_Init_Load))
++    .def("__init__", bp::make_constructor(&Net_Init_Load_Name))
+     .def("_forward", &Net<Dtype>::ForwardFromTo)
+     .def("_backward", &Net<Dtype>::BackwardFromTo)
+     .def("reshape", &Net<Dtype>::Reshape)
+     // The cast is to select a particular overload.
+-    .def("copy_from", static_cast<void (Net<Dtype>::*)(const string)>(
++    .def("copy_from", static_cast<void (Net<Dtype>::*)(const string, bool)>(
+         &Net<Dtype>::CopyTrainedLayersFrom))
+     .def("share_with", &Net<Dtype>::ShareTrainedLayersWith)
+     .add_property("_blob_loss_weights", bp::make_function(
+diff --git a/python/caffe/classifier.py b/python/caffe/classifier.py
+index 537193d..841b94d 100644
+--- a/python/caffe/classifier.py
++++ b/python/caffe/classifier.py
+@@ -22,8 +22,8 @@ class Classifier(caffe.Net):
+     """
+     def __init__(self, model_file, pretrained_file, image_dims=None,
+                  mean=None, input_scale=None, raw_scale=None,
+-                 channel_swap=None):
+-        caffe.Net.__init__(self, model_file, pretrained_file, caffe.TEST)
++                 channel_swap=None, weights_by_name = False):
++        caffe.Net.__init__(self, model_file, pretrained_file, caffe.TEST, weights_by_name)
+ 
+         # configure pre-processing
+         in_ = self.inputs[0]
+diff --git a/python/caffe/net_spec.py b/python/caffe/net_spec.py
+index 63de4cc..af372c6 100644
+--- a/python/caffe/net_spec.py
++++ b/python/caffe/net_spec.py
+@@ -76,7 +76,11 @@ def assign_proto(proto, name, val):
+         for k, v in six.iteritems(val):
+             assign_proto(getattr(proto, name), k, v)
+     else:
+-        setattr(proto, name, val)
++        try:
++            setattr(proto, name, val)
++        except AttributeError:
++            getattr(proto, name).CopyFrom(val)
++
+ 
+ 
+ class Top(object):
+@@ -104,6 +108,9 @@ class Function(object):
+     def __init__(self, type_name, inputs, params):
+         self.type_name = type_name
+         self.inputs = inputs
++        for inp in inputs:
++            # validate inputes
++            assert hasattr(inp, 'fn'), 'invalid input'
+         self.params = params
+         self.ntop = self.params.get('ntop', 1)
+         # use del to make sure kwargs are not double-processed as layer params
+@@ -114,6 +121,9 @@ class Function(object):
+             del self.params['in_place']
+         self.tops = tuple(Top(self, n) for n in range(self.ntop))
+ 
++        if self.ntop == 0:
++            self.tops = (Top(self, -1), )
++
+     def _get_name(self, names, autonames):
+         if self not in names and self.ntop > 0:
+             names[self] = self._get_top_name(self.tops[0], names, autonames)
+@@ -133,8 +143,12 @@ class Function(object):
+             return
+         bottom_names = []
+         for inp in self.inputs:
+-            inp._to_proto(layers, names, autonames)
+-            bottom_names.append(layers[inp.fn].top[inp.n])
++            if hasattr(inp.fn, '_to_proto'):
++                inp.fn._to_proto(layers, names, autonames)
++                bottom_names.append(layers[inp.fn].top[inp.n])
++            else:
++                bottom_names.append(inp.fn)
++
+         layer = caffe_pb2.LayerParameter()
+         layer.type = self.type_name
+         layer.bottom.extend(bottom_names)
+@@ -143,6 +157,8 @@ class Function(object):
+             layer.top.extend(layer.bottom)
+         else:
+             for top in self.tops:
++                if top.n == -1:
++                    continue
+                 layer.top.append(self._get_top_name(top, names, autonames))
+         layer.name = self._get_name(names, autonames)
+ 
+@@ -181,13 +197,38 @@ class NetSpec(object):
+     def __getitem__(self, item):
+         return self.__getattr__(item)
+ 
+-    def to_proto(self):
++    # name is to make draw_net work
++    # input is used to generate deploy prototxt (name, dimension, input_source)
++    def to_proto(self, net_name = "PythonNet", input = None):
+         names = {v: k for k, v in six.iteritems(self.tops)}
+         autonames = Counter()
+         layers = OrderedDict()
+         for name, top in six.iteritems(self.tops):
+             top._to_proto(layers, names, autonames)
+         net = caffe_pb2.NetParameter()
++        net.name = net_name
++
++        if input:
++            # put those with input source to front
++            # to make sources are optional
++            input.sort(key = lambda x:x[2], reverse = True)
++
++            bshapes = []
++            input_names = []
++            input_sources = []
++
++            for name, shape, source in input:
++                bshape = caffe_pb2.BlobShape()
++                bshape.dim.extend(shape)
++                bshapes.append(bshape)
++                input_names.append(name)
++                if source:
++                    input_sources.append(source)
++
++            net.input.extend(input_names)
++            net.input_shape.extend(bshapes)
++            net.input_source.extend(input_sources)
++
+         net.layer.extend(layers.values())
+         return net
+ 
+diff --git a/python/caffe/pycaffe.py b/python/caffe/pycaffe.py
+index c5c0b82..6971e68 100644
+--- a/python/caffe/pycaffe.py
++++ b/python/caffe/pycaffe.py
+@@ -95,8 +95,8 @@ def _Net_forward(self, blobs=None, start=None, end=None, **kwargs):
+         outputs = set(self.outputs + blobs)
+ 
+     if kwargs:
+-        if set(kwargs.keys()) != set(self.inputs):
+-            raise Exception('Input blob arguments do not match net inputs.')
++        #if set(kwargs.keys()) != set(self.inputs):
++        #    raise Exception('Input blob arguments do not match net inputs.')
+         # Set input according to defined shapes and make arrays single and
+         # C-contiguous as Caffe expects.
+         for in_, blob in six.iteritems(kwargs):
+diff --git a/python/caffe/test/test_solver.py b/python/caffe/test/test_solver.py
+index f618fde..1dde605 100644
+--- a/python/caffe/test/test_solver.py
++++ b/python/caffe/test/test_solver.py
+@@ -54,7 +54,7 @@ class TestSolver(unittest.TestCase):
+                 total += bl.data.sum() + bl.diff.sum()
+ 
+     def test_snapshot(self):
+-        self.solver.snapshot()
++        self.solver.snapshot(False)
+         # Check that these files exist and then remove them
+         files = ['model_iter_0.caffemodel', 'model_iter_0.solverstate']
+         for fn in files:
+diff --git a/python/classify.py b/python/classify.py
+index 4544c51..d4de082 100755
+--- a/python/classify.py
++++ b/python/classify.py
+@@ -42,8 +42,9 @@ def main(argv):
+     )
+     parser.add_argument(
+         "--gpu",
+-        action='store_true',
+-        help="Switch for gpu computation."
++        type = int,
++        default=-1,
++        help="GPU ID. -1 use CPU"
+     )
+     parser.add_argument(
+         "--center_only",
+@@ -52,6 +53,11 @@ def main(argv):
+              "averaging predictions across crops (default)."
+     )
+     parser.add_argument(
++        "--output_blobs",
++        default='',
++        help="Blobs to output, in addition to the output-0 blobs, seperate by , e.g, fc7,fc8"
++    )
++    parser.add_argument(
+         "--images_dim",
+         default='256,256',
+         help="Canonical 'height,width' dimensions of input images."
+@@ -89,6 +95,9 @@ def main(argv):
+     args = parser.parse_args()
+ 
+     image_dims = [int(s) for s in args.images_dim.split(',')]
++    output_blobs = args.output_blobs.split(',')
++    if len(output_blobs) == 0:
++        output_blobs = None
+ 
+     mean, channel_swap = None, None
+     if args.mean_file:
+@@ -96,8 +105,9 @@ def main(argv):
+     if args.channel_swap:
+         channel_swap = [int(s) for s in args.channel_swap.split(',')]
+ 
+-    if args.gpu:
++    if args.gpu >= 0:
+         caffe.set_mode_gpu()
++        caffe.set_device(args.gpu)
+         print("GPU mode")
+     else:
+         caffe.set_mode_cpu()
+@@ -107,13 +117,17 @@ def main(argv):
+     classifier = caffe.Classifier(args.model_def, args.pretrained_model,
+             image_dims=image_dims, mean=mean,
+             input_scale=args.input_scale, raw_scale=args.raw_scale,
+-            channel_swap=channel_swap)
++            channel_swap=channel_swap, output_blobs = output_blobs)
+ 
+     # Load numpy array (.npy), directory glob (*.jpg), or image file.
+     args.input_file = os.path.expanduser(args.input_file)
+     if args.input_file.endswith('npy'):
+         print("Loading file: %s" % args.input_file)
+         inputs = np.load(args.input_file)
++    if args.input_file.endswith('txt'):
++        print("Loading file: %s" % args.input_file)
++        inputs = [caffe.io.load_image(im_f.strip())
++                for im_f in open(args.input_file)]
+     elif os.path.isdir(args.input_file):
+         print("Loading folder: %s" % args.input_file)
+         inputs =[caffe.io.load_image(im_f)
+@@ -122,17 +136,43 @@ def main(argv):
+         print("Loading file: %s" % args.input_file)
+         inputs = [caffe.io.load_image(args.input_file)]
+ 
+-    print("Classifying %d inputs." % len(inputs))
++    # Usage
++    try:
++        #lock = Lock("/tmp/ycli-gpu-%d.lock" % args.gpu)
++        #lock.acquire()
++        print("Classifying %d inputs." % len(inputs))
+ 
+-    # Classify.
+-    start = time.time()
+-    predictions = classifier.predict(inputs, not args.center_only)
+-    print("Done in %.2f s." % (time.time() - start))
++        # Classify.
++        start = time.time()
++        predictions = classifier.predict(inputs, not args.center_only)
++        print("Done in %.2f s." % (time.time() - start))
++    finally:
++        pass
++        #lock.release()
+ 
+     # Save
+     print("Saving results into %s" % args.output_file)
+-    np.save(args.output_file, predictions)
++    np.savez(args.output_file, **predictions)
++
++import os
++import fcntl
++
++class Lock:
++
++    def __init__(self, filename):
++        self.filename = filename
++        # This will create it if it does not exist already
++        self.handle = open(filename, 'w')
++
++    # Bitwise OR fcntl.LOCK_NB if you need a non-blocking lock
++    def acquire(self):
++        fcntl.flock(self.handle, fcntl.LOCK_EX)
++
++    def release(self):
++        fcntl.flock(self.handle, fcntl.LOCK_UN)
+ 
++    def __del__(self):
++        self.handle.close()
+ 
+ if __name__ == '__main__':
+     main(sys.argv)
+diff --git a/src/caffe/data_transformer.cpp b/src/caffe/data_transformer.cpp
+index 7189d67..389549d 100644
+--- a/src/caffe/data_transformer.cpp
++++ b/src/caffe/data_transformer.cpp
+@@ -38,6 +38,17 @@ DataTransformer<Dtype>::DataTransformer(const TransformationParameter& param,
+   }
+ }
+ 
++
++template<typename Dtype>
++void DataTransformer<Dtype>::Reset() {
++  // only take effects on rng enabled
++  if (this->rng_) {
++    do_mirror_ = Rand(0);
++    h_off_ = Rand(0);
++    w_off_ = Rand(0);
++  }
++}
++
+ template<typename Dtype>
+ void DataTransformer<Dtype>::Transform(const Datum& datum,
+                                        Dtype* transformed_data) {
+@@ -48,7 +59,7 @@ void DataTransformer<Dtype>::Transform(const Datum& datum,
+ 
+   const int crop_size = param_.crop_size();
+   const Dtype scale = param_.scale();
+-  const bool do_mirror = param_.mirror() && Rand(2);
++  const bool do_mirror = param_.mirror() && Rand(2, do_mirror_);
+   const bool has_mean_file = param_.has_mean_file();
+   const bool has_uint8 = data.size() > 0;
+   const bool has_mean_values = mean_values_.size() > 0;
+@@ -85,8 +96,8 @@ void DataTransformer<Dtype>::Transform(const Datum& datum,
+     width = crop_size;
+     // We only do random crop when we do training.
+     if (phase_ == TRAIN) {
+-      h_off = Rand(datum_height - crop_size + 1);
+-      w_off = Rand(datum_width - crop_size + 1);
++      h_off = Rand(datum_height - crop_size + 1, h_off_);
++      w_off = Rand(datum_width - crop_size + 1, w_off_);
+     } else {
+       h_off = (datum_height - crop_size) / 2;
+       w_off = (datum_width - crop_size) / 2;
+@@ -244,7 +255,7 @@ void DataTransformer<Dtype>::Transform(const cv::Mat& cv_img,
+   CHECK(cv_img.depth() == CV_8U) << "Image data type must be unsigned byte";
+ 
+   const Dtype scale = param_.scale();
+-  const bool do_mirror = param_.mirror() && Rand(2);
++  const bool do_mirror = param_.mirror() && Rand(2, do_mirror_);
+   const bool has_mean_file = param_.has_mean_file();
+   const bool has_mean_values = mean_values_.size() > 0;
+ 
+@@ -278,8 +289,8 @@ void DataTransformer<Dtype>::Transform(const cv::Mat& cv_img,
+     CHECK_EQ(crop_size, width);
+     // We only do random crop when we do training.
+     if (phase_ == TRAIN) {
+-      h_off = Rand(img_height - crop_size + 1);
+-      w_off = Rand(img_width - crop_size + 1);
++      h_off = Rand(img_height - crop_size + 1, h_off_);
++      w_off = Rand(img_width - crop_size + 1, w_off_);
+     } else {
+       h_off = (img_height - crop_size) / 2;
+       w_off = (img_width - crop_size) / 2;
+@@ -358,7 +369,7 @@ void DataTransformer<Dtype>::Transform(Blob<Dtype>* input_blob,
+ 
+ 
+   const Dtype scale = param_.scale();
+-  const bool do_mirror = param_.mirror() && Rand(2);
++  const bool do_mirror = param_.mirror() && Rand(2, do_mirror_);
+   const bool has_mean_file = param_.has_mean_file();
+   const bool has_mean_values = mean_values_.size() > 0;
+ 
+@@ -369,8 +380,8 @@ void DataTransformer<Dtype>::Transform(Blob<Dtype>* input_blob,
+     CHECK_EQ(crop_size, width);
+     // We only do random crop when we do training.
+     if (phase_ == TRAIN) {
+-      h_off = Rand(input_height - crop_size + 1);
+-      w_off = Rand(input_width - crop_size + 1);
++      h_off = Rand(input_height - crop_size + 1, h_off_);
++      w_off = Rand(input_width - crop_size + 1, w_off_);
+     } else {
+       h_off = (input_height - crop_size) / 2;
+       w_off = (input_width - crop_size) / 2;
+@@ -532,12 +543,21 @@ void DataTransformer<Dtype>::InitRand() {
+ }
+ 
+ template <typename Dtype>
+-int DataTransformer<Dtype>::Rand(int n) {
++int DataTransformer<Dtype>::Rand(int n, int state /*= -1*/) {
+   CHECK(rng_);
+-  CHECK_GT(n, 0);
++  // CHECK_GT(n, 0);
+   caffe::rng_t* rng =
+       static_cast<caffe::rng_t*>(rng_->generator());
+-  return ((*rng)() % n);
++  if (state == -1) {
++    // to make this deterministic
++    // return value of (*rng)() is uint64, but the state is only a int
++    state = (*rng)() % std::numeric_limits<int>::max();
++  }
++
++  if (n > 0)
++    return state % n;
++  else
++    return state;
+ }
+ 
+ INSTANTIATE_CLASS(DataTransformer);
+diff --git a/src/caffe/layers/data_layer.cpp b/src/caffe/layers/data_layer.cpp
+index 66e6301..98efb03 100644
+--- a/src/caffe/layers/data_layer.cpp
++++ b/src/caffe/layers/data_layer.cpp
+@@ -79,6 +79,9 @@ void DataLayer<Dtype>::load_batch(Batch<Dtype>* batch) {
+   if (this->output_labels_) {
+     top_label = batch->label_.mutable_cpu_data();
+   }
++  const bool share_crop = this->layer_param_.data_param().share_crop();
++  this->data_transformer_->Reset();
++
+   for (int item_id = 0; item_id < batch_size; ++item_id) {
+     timer.Start();
+     // get a datum
+@@ -89,6 +92,8 @@ void DataLayer<Dtype>::load_batch(Batch<Dtype>* batch) {
+     int offset = batch->data_.offset(item_id);
+     this->transformed_data_.set_cpu_data(top_data + offset);
+     this->data_transformer_->Transform(datum, &(this->transformed_data_));
++    if (!share_crop)
++      this->data_transformer_->Reset();
+     // Copy label.
+     if (this->output_labels_) {
+       top_label[item_id] = datum.label();
+diff --git a/src/caffe/layers/eltwise_layer.cpp b/src/caffe/layers/eltwise_layer.cpp
+index 2125616..d2188c7 100644
+--- a/src/caffe/layers/eltwise_layer.cpp
++++ b/src/caffe/layers/eltwise_layer.cpp
+@@ -8,19 +8,24 @@ namespace caffe {
+ 
+ template <typename Dtype>
+ void EltwiseLayer<Dtype>::LayerSetUp(const vector<Blob<Dtype>*>& bottom,
+-      const vector<Blob<Dtype>*>& top) {
+-  CHECK(this->layer_param().eltwise_param().coeff_size() == 0
+-      || this->layer_param().eltwise_param().coeff_size() == bottom.size()) <<
+-      "Eltwise Layer takes one coefficient per bottom blob.";
+-  CHECK(!(this->layer_param().eltwise_param().operation()
+-      == EltwiseParameter_EltwiseOp_PROD
+-      && this->layer_param().eltwise_param().coeff_size())) <<
+-      "Eltwise layer only takes coefficients for summation.";
++    const vector<Blob<Dtype>*>& top) {
+   op_ = this->layer_param_.eltwise_param().operation();
++  coeff_blob_ = this->layer_param().eltwise_param().coeff_blob();
++  if (coeff_blob_) {
++    CHECK_EQ(op_, EltwiseParameter_EltwiseOp_SUM)
++      << "coeff_blob option only implemented for the SUM operation";
++  }
++  const int coeff_size = this->layer_param().eltwise_param().coeff_size();
++  CHECK(coeff_size == 0 || (!coeff_blob_ && coeff_size == bottom.size())
++      || (coeff_blob_ && coeff_size == bottom.size() - 1)) <<
++    "Eltwise Layer takes one coefficient per bottom blob.";
++  CHECK(op_ == EltwiseParameter_EltwiseOp_SUM
++      || this->layer_param().eltwise_param().coeff_size() == 0) <<
++    "Eltwise layer only takes coefficients for summation.";
+   // Blob-wise coefficients for the elementwise operation.
+-  coeffs_ = vector<Dtype>(bottom.size(), 1);
+-  if (this->layer_param().eltwise_param().coeff_size()) {
+-    for (int i = 0; i < bottom.size(); ++i) {
++  coeffs_.resize(bottom.size(), 1);
++  if (coeff_size) {
++    for (int i = 0; i < bottom.size() - coeff_blob_; ++i) {
+       coeffs_[i] = this->layer_param().eltwise_param().coeff(i);
+     }
+   }
+@@ -29,9 +34,26 @@ void EltwiseLayer<Dtype>::LayerSetUp(const vector<Blob<Dtype>*>& bottom,
+ 
+ template <typename Dtype>
+ void EltwiseLayer<Dtype>::Reshape(const vector<Blob<Dtype>*>& bottom,
+-      const vector<Blob<Dtype>*>& top) {
++    const vector<Blob<Dtype>*>& top) {
+   for (int i = 1; i < bottom.size(); ++i) {
+-    CHECK(bottom[i]->shape() == bottom[0]->shape());
++    // by pass this check for only single data blob
++    // TODO should check for single data blob as well
++    if (coeff_blob_ && i == bottom.size() - 1) {
++      if (bottom.size() > 2)
++      {
++        CHECK_EQ(i, bottom[i]->shape(0))
++          << "Dimension of coeff blob axis 0 must equal the number of bottom "
++          << "blobs (not including the coeff blob itself).";
++        for (int input_axis = 0, coeff_axis = 1;
++            coeff_axis < bottom[i]->num_axes(); ++input_axis, ++coeff_axis) {
++          CHECK_EQ(bottom[0]->shape(input_axis), bottom[i]->shape(coeff_axis))
++            << "Each axis i >= 1 of the coeff blob must match the (i-1)th "
++            << "axis of the input.";
++        }
++      }
++    } else {
++      CHECK(bottom[i]->shape() == bottom[0]->shape()) << bottom[i] -> shape_string() << " vs. " << bottom[0] -> shape_string();
++    }
+   }
+   top[0]->ReshapeLike(*bottom[0]);
+   // If max operation, we will initialize the vector index part.
+@@ -50,49 +72,62 @@ void EltwiseLayer<Dtype>::Forward_cpu(
+   const int count = top[0]->count();
+   Dtype* top_data = top[0]->mutable_cpu_data();
+   switch (op_) {
+-  case EltwiseParameter_EltwiseOp_PROD:
+-    caffe_mul(count, bottom[0]->cpu_data(), bottom[1]->cpu_data(), top_data);
+-    for (int i = 2; i < bottom.size(); ++i) {
+-      caffe_mul(count, top_data, bottom[i]->cpu_data(), top_data);
+-    }
+-    break;
+-  case EltwiseParameter_EltwiseOp_SUM:
+-    caffe_set(count, Dtype(0), top_data);
+-    // TODO(shelhamer) does BLAS optimize to sum for coeff = 1?
+-    for (int i = 0; i < bottom.size(); ++i) {
+-      caffe_axpy(count, coeffs_[i], bottom[i]->cpu_data(), top_data);
+-    }
+-    break;
+-  case EltwiseParameter_EltwiseOp_MAX:
+-    // Initialize
+-    mask = max_idx_.mutable_cpu_data();
+-    caffe_set(count, -1, mask);
+-    caffe_set(count, Dtype(-FLT_MAX), top_data);
+-    // bottom 0 & 1
+-    bottom_data_a = bottom[0]->cpu_data();
+-    bottom_data_b = bottom[1]->cpu_data();
+-    for (int idx = 0; idx < count; ++idx) {
+-      if (bottom_data_a[idx] > bottom_data_b[idx]) {
+-        top_data[idx] = bottom_data_a[idx];  // maxval
+-        mask[idx] = 0;  // maxid
+-      } else {
+-        top_data[idx] = bottom_data_b[idx];  // maxval
+-        mask[idx] = 1;  // maxid
++    case EltwiseParameter_EltwiseOp_PROD:
++      caffe_mul(count, bottom[0]->cpu_data(), bottom[1]->cpu_data(), top_data);
++      for (int i = 2; i < bottom.size(); ++i) {
++        caffe_mul(count, top_data, bottom[i]->cpu_data(), top_data);
+       }
+-    }
+-    // bottom 2++
+-    for (int blob_idx = 2; blob_idx < bottom.size(); ++blob_idx) {
+-      bottom_data_b = bottom[blob_idx]->cpu_data();
++      break;
++    case EltwiseParameter_EltwiseOp_SUM:
++      caffe_set(count, Dtype(0), top_data);
++      // TODO(shelhamer) does BLAS optimize to sum for coeff = 1?
++      for (int i = 0; i < bottom.size() - coeff_blob_; ++i) {
++        if (coeff_blob_) {
++          const int num = bottom[bottom.size() - 1]->count() /
++            (bottom.size() - 1);
++          const int dim = bottom[i]->count() / num;
++          const Dtype* bottom_data = bottom[i]->cpu_data();
++          const Dtype* coeff_data = bottom[bottom.size() - 1]->cpu_data();
++          for (int j = 0; j < num; ++j, bottom_data += dim, top_data += dim) {
++            const Dtype coeff = coeffs_[i] * coeff_data[i * num + j];
++            caffe_axpy(dim, coeff, bottom_data, top_data);
++          }
++          top_data = top[0]->mutable_cpu_data();
++        } else {
++          caffe_axpy(count, coeffs_[i], bottom[i]->cpu_data(), top_data);
++        }
++      }
++      break;
++    case EltwiseParameter_EltwiseOp_MAX:
++      // Initialize
++      mask = max_idx_.mutable_cpu_data();
++      caffe_set(count, -1, mask);
++      caffe_set(count, Dtype(-FLT_MAX), top_data);
++      // bottom 0 & 1
++      bottom_data_a = bottom[0]->cpu_data();
++      bottom_data_b = bottom[1]->cpu_data();
+       for (int idx = 0; idx < count; ++idx) {
+-        if (bottom_data_b[idx] > top_data[idx]) {
++        if (bottom_data_a[idx] > bottom_data_b[idx]) {
++          top_data[idx] = bottom_data_a[idx];  // maxval
++          mask[idx] = 0;  // maxid
++        } else {
+           top_data[idx] = bottom_data_b[idx];  // maxval
+-          mask[idx] = blob_idx;  // maxid
++          mask[idx] = 1;  // maxid
+         }
+       }
+-    }
+-    break;
+-  default:
+-    LOG(FATAL) << "Unknown elementwise operation.";
++      // bottom 2++
++      for (int blob_idx = 2; blob_idx < bottom.size(); ++blob_idx) {
++        bottom_data_b = bottom[blob_idx]->cpu_data();
++        for (int idx = 0; idx < count; ++idx) {
++          if (bottom_data_b[idx] > top_data[idx]) {
++            top_data[idx] = bottom_data_b[idx];  // maxval
++            mask[idx] = blob_idx;  // maxid
++          }
++        }
++      }
++      break;
++    default:
++      LOG(FATAL) << "Unknown elementwise operation.";
+   }
+ }
+ 
+@@ -103,48 +138,57 @@ void EltwiseLayer<Dtype>::Backward_cpu(const vector<Blob<Dtype>*>& top,
+   const int count = top[0]->count();
+   const Dtype* top_data = top[0]->cpu_data();
+   const Dtype* top_diff = top[0]->cpu_diff();
+-  for (int i = 0; i < bottom.size(); ++i) {
++  for (int i = 0; i < bottom.size() - coeff_blob_; ++i) {
+     if (propagate_down[i]) {
+       const Dtype* bottom_data = bottom[i]->cpu_data();
+       Dtype* bottom_diff = bottom[i]->mutable_cpu_diff();
+       switch (op_) {
+-      case EltwiseParameter_EltwiseOp_PROD:
+-        if (stable_prod_grad_) {
+-          bool initialized = false;
+-          for (int j = 0; j < bottom.size(); ++j) {
+-            if (i == j) { continue; }
+-            if (!initialized) {
+-              caffe_copy(count, bottom[j]->cpu_data(), bottom_diff);
+-              initialized = true;
+-            } else {
+-              caffe_mul(count, bottom[j]->cpu_data(), bottom_diff,
+-                        bottom_diff);
++        case EltwiseParameter_EltwiseOp_PROD:
++          if (stable_prod_grad_) {
++            bool initialized = false;
++            for (int j = 0; j < bottom.size(); ++j) {
++              if (i == j) { continue; }
++              if (!initialized) {
++                caffe_copy(count, bottom[j]->cpu_data(), bottom_diff);
++                initialized = true;
++              } else {
++                caffe_mul(count, bottom[j]->cpu_data(), bottom_diff,
++                    bottom_diff);
++              }
+             }
++          } else {
++            caffe_div(count, top_data, bottom_data, bottom_diff);
+           }
+-        } else {
+-          caffe_div(count, top_data, bottom_data, bottom_diff);
+-        }
+-        caffe_mul(count, bottom_diff, top_diff, bottom_diff);
+-        break;
+-      case EltwiseParameter_EltwiseOp_SUM:
+-        if (coeffs_[i] == Dtype(1)) {
+-          caffe_copy(count, top_diff, bottom_diff);
+-        } else {
+-          caffe_cpu_scale(count, coeffs_[i], top_diff, bottom_diff);
+-        }
+-        break;
+-      case EltwiseParameter_EltwiseOp_MAX:
+-        mask = max_idx_.cpu_data();
+-        for (int index = 0; index < count; ++index) {
+-          Dtype gradient = 0;
+-          if (mask[index] == i) {
+-            gradient += top_diff[index];
++          caffe_mul(count, bottom_diff, top_diff, bottom_diff);
++          break;
++        case EltwiseParameter_EltwiseOp_SUM:
++          if (coeff_blob_) {
++            const int num = bottom[bottom.size() - 1]->count() /
++              (bottom.size() - 1);
++            const int dim = bottom[i]->count() / num;
++            const Dtype* coeff_data = bottom[bottom.size() - 1]->cpu_data();
++            for (int j = 0; j < num; ++j, bottom_diff += dim, top_diff += dim) {
++              const Dtype coeff = coeffs_[i] * coeff_data[i * num + j];
++              caffe_cpu_scale(dim, coeff, top_diff, bottom_diff);
++            }
++          } else if (coeffs_[i] == Dtype(1.)) {
++            caffe_copy(count, top_diff, bottom_diff);
++          } else {
++            caffe_cpu_scale(count, coeffs_[i], top_diff, bottom_diff);
+           }
+-          bottom_diff[index] = gradient;
+-        }
+-        break;
+-      default:
+-        LOG(FATAL) << "Unknown elementwise operation.";
++          break;
++        case EltwiseParameter_EltwiseOp_MAX:
++          mask = max_idx_.cpu_data();
++          for (int index = 0; index < count; ++index) {
++            Dtype gradient = 0;
++            if (mask[index] == i) {
++              gradient += top_diff[index];
++            }
++            bottom_diff[index] = gradient;
++          }
++          break;
++        default:
++          LOG(FATAL) << "Unknown elementwise operation.";
+       }
+     }
+   }
+diff --git a/src/caffe/layers/eltwise_layer.cu b/src/caffe/layers/eltwise_layer.cu
+index c142852..04f3a85 100644
+--- a/src/caffe/layers/eltwise_layer.cu
++++ b/src/caffe/layers/eltwise_layer.cu
+@@ -31,11 +31,32 @@ __global__ void MaxForward(const int nthreads, const Dtype* bottom_data_a,
+ }
+ 
+ template <typename Dtype>
++__global__ void CoeffSum(const int count, const int dim,
++    const int num_offset, const Dtype coeff, const Dtype* coeff_data,
++    const bool backward, const Dtype* in, Dtype* out) {
++  CUDA_KERNEL_LOOP(index, count) {
++    const int n = num_offset + index / dim;
++    const Dtype other_coeff = coeff_data ? coeff_data[n] : Dtype(1);
++    const Dtype final_coeff = coeff * other_coeff;
++    const Dtype result = in[index] * final_coeff;
++    if (num_offset == 0 || backward) {
++      out[index] = result;
++    } else {
++      out[index] += result;
++    }
++  }
++}
++
++template <typename Dtype>
+ void EltwiseLayer<Dtype>::Forward_gpu(const vector<Blob<Dtype>*>& bottom,
+     const vector<Blob<Dtype>*>& top) {
+   int* mask = NULL;
+   const int count = top[0]->count();
++  const int num = top[0]->num();
++  const int dim = count / num;
+   Dtype* top_data = top[0]->mutable_gpu_data();
++  const Dtype* coeff_data = NULL;
++  const bool kBackward = false;
+   switch (op_) {
+   case EltwiseParameter_EltwiseOp_PROD:
+     caffe_gpu_mul(count, bottom[0]->gpu_data(), bottom[1]->gpu_data(),
+@@ -45,10 +66,17 @@ void EltwiseLayer<Dtype>::Forward_gpu(const vector<Blob<Dtype>*>& bottom,
+     }
+     break;
+   case EltwiseParameter_EltwiseOp_SUM:
+-    caffe_gpu_set(count, Dtype(0.), top_data);
+     // TODO(shelhamer) does cuBLAS optimize to sum for coeff = 1?
+-    for (int i = 0; i < bottom.size(); ++i) {
+-      caffe_gpu_axpy(count, coeffs_[i], bottom[i]->gpu_data(), top_data);
++    if (coeff_blob_) {
++      coeff_data = bottom[bottom.size() - 1]->gpu_data();
++    }
++    for (int i = 0; i < bottom.size() - coeff_blob_; ++i) {
++      const Dtype* bottom_data = bottom[i]->gpu_data();
++      CoeffSum<Dtype>  // NOLINT_NEXT_LINE(whitespace/operators)
++          <<<CAFFE_GET_BLOCKS(count), CAFFE_CUDA_NUM_THREADS>>>(
++          count, dim, i * num, coeffs_[i], coeff_data,
++          kBackward, bottom_data, top_data);
++      CUDA_POST_KERNEL_CHECK;
+     }
+     break;
+   case EltwiseParameter_EltwiseOp_MAX:
+@@ -84,11 +112,18 @@ void EltwiseLayer<Dtype>::Backward_gpu(const vector<Blob<Dtype>*>& top,
+     const vector<bool>& propagate_down, const vector<Blob<Dtype>*>& bottom) {
+   const int* mask = NULL;
+   const int count = top[0]->count();
++  const int num = top[0]->num();
++  const int dim = count / num;
+   const Dtype* top_data = top[0]->gpu_data();
+-  const Dtype* top_diff = top[0]->gpu_diff();
+-  for (int i = 0; i < bottom.size(); ++i) {
++  const Dtype* coeff_data = NULL;
++  if (coeff_blob_) {
++    coeff_data = bottom[bottom.size() - 1]->gpu_data();
++  }
++  const bool kBackward = true;
++  for (int i = 0; i < bottom.size() - coeff_blob_; ++i) {
+     if (propagate_down[i]) {
+       const Dtype* bottom_data = bottom[i]->gpu_data();
++      const Dtype* top_diff = top[0]->gpu_diff();
+       Dtype* bottom_diff = bottom[i]->mutable_gpu_diff();
+       switch (op_) {
+       case EltwiseParameter_EltwiseOp_PROD:
+@@ -110,11 +145,11 @@ void EltwiseLayer<Dtype>::Backward_gpu(const vector<Blob<Dtype>*>& top,
+         caffe_gpu_mul(count, bottom_diff, top_diff, bottom_diff);
+         break;
+       case EltwiseParameter_EltwiseOp_SUM:
+-        if (coeffs_[i] == Dtype(1.)) {
+-          caffe_copy(count, top_diff, bottom_diff);
+-        } else {
+-          caffe_gpu_scale(count, coeffs_[i], top_diff, bottom_diff);
+-        }
++        CoeffSum<Dtype>  // NOLINT_NEXT_LINE(whitespace/operators)
++            <<<CAFFE_GET_BLOCKS(count), CAFFE_CUDA_NUM_THREADS>>>(
++            count, dim, i * num, coeffs_[i], coeff_data,
++            kBackward, top_diff, bottom_diff);
++        CUDA_POST_KERNEL_CHECK;
+         break;
+       case EltwiseParameter_EltwiseOp_MAX:
+         mask = max_idx_.gpu_data();
+diff --git a/src/caffe/layers/lstm_unit_layer.cpp b/src/caffe/layers/lstm_unit_layer.cpp
+new file mode 100644
+index 0000000..2111659
+--- /dev/null
++++ b/src/caffe/layers/lstm_unit_layer.cpp
+@@ -0,0 +1,138 @@
++#include <algorithm>
++#include <cmath>
++#include <vector>
++
++#include "caffe/layers/lstm_unit_layer.hpp"
++#include "caffe/util/math_functions.hpp"
++
++namespace caffe {
++
++    template <typename Dtype>
++        inline Dtype sigmoid(Dtype x) {
++            return 1. / (1. + exp(-x));
++        }
++
++    template <typename Dtype>
++        inline Dtype tanh(Dtype x) {
++            return 2. * sigmoid(2. * x) - 1.;
++        }
++
++    template <typename Dtype>
++        void LSTMUnitLayer<Dtype>::Reshape(const vector<Blob<Dtype>*>& bottom,
++                const vector<Blob<Dtype>*>& top) {
++
++            CHECK_EQ(3, bottom.size());
++            CHECK_EQ(3, bottom[0]->num_axes());
++            CHECK_EQ(3, bottom[1]->num_axes());
++            CHECK_EQ(2, bottom[2]->num_axes());
++
++            const int num_instances = bottom[0]->shape(0);
++
++            for (int i = 0; i < bottom.size(); ++i) {
++                CHECK_EQ(num_instances, bottom[i]->shape(0));
++                CHECK_EQ(1, bottom[i]->shape(1));
++            }
++
++            hidden_dim_ = bottom[0]->shape(2);
++            CHECK_EQ(4 * hidden_dim_, bottom[1]->shape(2));
++
++            top[0]->ReshapeLike(*bottom[0]);
++            top[1]->ReshapeLike(*bottom[0]);
++            X_acts_.ReshapeLike(*bottom[1]);
++        }
++
++    template <typename Dtype>
++        void LSTMUnitLayer<Dtype>::Forward_cpu(const vector<Blob<Dtype>*>& bottom,
++                const vector<Blob<Dtype>*>& top) {
++            const int num = bottom[0]->shape(0);
++            const int x_dim = hidden_dim_ * 4;
++
++            const Dtype* C_prev = bottom[0]->cpu_data();
++            const Dtype* X = bottom[1]->cpu_data();
++            const Dtype* flush = bottom[2]->cpu_data();
++
++            Dtype* C = top[0]->mutable_cpu_data();
++            Dtype* H = top[1]->mutable_cpu_data();
++            for (int n = 0; n < num; ++n) {
++                for (int d = 0; d < hidden_dim_; ++d) {
++                    const Dtype i = sigmoid(X[d]);
++                    const Dtype f = (*flush == 0) ? 0 :
++                        (*flush * sigmoid(X[1 * hidden_dim_ + d]));
++                    const Dtype o = sigmoid(X[2 * hidden_dim_ + d]);
++                    const Dtype g = tanh(X[3 * hidden_dim_ + d]);
++                    const Dtype c_prev = C_prev[d];
++                    const Dtype c = f * c_prev + i * g;
++                    C[d] = c;
++                    const Dtype tanh_c = tanh(c);
++                    H[d] = o * tanh_c;
++                }
++                C_prev += hidden_dim_;
++                X += x_dim;
++                C += hidden_dim_;
++                H += hidden_dim_;
++                ++flush;
++            }
++        }
++
++    template <typename Dtype>
++        void LSTMUnitLayer<Dtype>::Backward_cpu(const vector<Blob<Dtype>*>& top,
++                const vector<bool>& propagate_down, const vector<Blob<Dtype>*>& bottom) {
++            CHECK(!propagate_down[2]) << "Cannot backpropagate to sequence indicators.";
++            if (!propagate_down[0] && !propagate_down[1]) { return; }
++
++            const int num = bottom[0]->shape(0);
++            const int x_dim = hidden_dim_ * 4;
++
++            const Dtype* C_prev = bottom[0]->cpu_data();
++            const Dtype* X = bottom[1]->cpu_data();
++            const Dtype* flush = bottom[2]->cpu_data();
++            const Dtype* C = top[0]->cpu_data();
++            const Dtype* H = top[1]->cpu_data();
++            const Dtype* C_diff = top[0]->cpu_diff();
++            const Dtype* H_diff = top[1]->cpu_diff();
++            Dtype* C_prev_diff = bottom[0]->mutable_cpu_diff();
++            Dtype* X_diff = bottom[1]->mutable_cpu_diff();
++
++            for (int n = 0; n < num; ++n) {
++                for (int d = 0; d < hidden_dim_; ++d) {
++                    const Dtype i = sigmoid(X[d]);
++                    const Dtype f = (*flush == 0) ? 0 :
++                        (*flush * sigmoid(X[1 * hidden_dim_ + d]));
++                    const Dtype o = sigmoid(X[2 * hidden_dim_ + d]);
++                    const Dtype g = tanh(X[3 * hidden_dim_ + d]);
++                    const Dtype c_prev = C_prev[d];
++                    const Dtype c = C[d];
++                    const Dtype tanh_c = tanh(c);
++                    Dtype* c_prev_diff = C_prev_diff + d;
++                    Dtype* i_diff = X_diff + d;
++                    Dtype* f_diff = X_diff + 1 * hidden_dim_ + d;
++                    Dtype* o_diff = X_diff + 2 * hidden_dim_ + d;
++                    Dtype* g_diff = X_diff + 3 * hidden_dim_ + d;
++                    const Dtype c_term_diff =
++                        C_diff[d] + H_diff[d] * o * (1 - tanh_c * tanh_c);
++                    *c_prev_diff = c_term_diff * f;
++                    *i_diff = c_term_diff * g * i * (1 - i);
++                    *f_diff = c_term_diff * c_prev * f * (1 - f);
++                    *o_diff = H_diff[d] * tanh_c * o * (1 - o);
++                    *g_diff = c_term_diff * i * (1 - g * g);
++                }
++                C_prev += hidden_dim_;
++                X += x_dim;
++                C += hidden_dim_;
++                H += hidden_dim_;
++                C_diff += hidden_dim_;
++                H_diff += hidden_dim_;
++                X_diff += x_dim;
++                C_prev_diff += hidden_dim_;
++                ++flush;
++            }
++        }
++
++#ifdef CPU_ONLY
++    STUB_GPU(LSTMUnitLayer);
++#endif
++
++    INSTANTIATE_CLASS(LSTMUnitLayer);
++    REGISTER_LAYER_CLASS(LSTMUnit);
++
++}  // namespace caffe
+diff --git a/src/caffe/layers/lstm_unit_layer.cu b/src/caffe/layers/lstm_unit_layer.cu
+new file mode 100644
+index 0000000..c69205a
+--- /dev/null
++++ b/src/caffe/layers/lstm_unit_layer.cu
+@@ -0,0 +1,154 @@
++#include <algorithm>
++#include <cmath>
++#include <vector>
++
++#include "caffe/layers/lstm_unit_layer.hpp"
++#include "caffe/util/math_functions.hpp"
++
++namespace caffe {
++
++template <typename Dtype>
++__device__ Dtype sigmoid(const Dtype x) {
++  return Dtype(1) / (Dtype(1) + exp(-x));
++}
++
++template <typename Dtype>
++__device__ Dtype tanh(const Dtype x) {
++  return Dtype(2) * sigmoid(Dtype(2) * x) - Dtype(1);
++}
++
++template <typename Dtype>
++__global__ void LSTMActsForward(const int nthreads, const int dim,
++                                const Dtype* X, Dtype* X_acts) {
++  CUDA_KERNEL_LOOP(index, nthreads) {
++    const int x_dim = 4 * dim;
++    const int d = index % x_dim;
++    if (d < 3 * dim) {
++      X_acts[index] = sigmoid(X[index]);
++    } else {
++      X_acts[index] = tanh(X[index]);
++    }
++  }
++}
++
++template <typename Dtype>
++__global__ void LSTMUnitForward(const int nthreads, const int dim,
++    const Dtype* C_prev, const Dtype* X, const Dtype* flush,
++    Dtype* C, Dtype* H) {
++  CUDA_KERNEL_LOOP(index, nthreads) {
++    const int n = index / dim;
++    const int d = index % dim;
++    const Dtype* X_offset = X + 4 * dim * n;
++    const Dtype i = X_offset[d];
++    const Dtype f = X_offset[1 * dim + d];
++    const Dtype o = X_offset[2 * dim + d];
++    const Dtype g = X_offset[3 * dim + d];
++    const Dtype c_prev = C_prev[index];
++    const Dtype c = flush[n] * f * c_prev + i * g;
++    C[index] = c;
++    const Dtype tanh_c = tanh(c);
++    H[index] = o * tanh_c;
++  }
++}
++
++template <typename Dtype>
++void LSTMUnitLayer<Dtype>::Forward_gpu(const vector<Blob<Dtype>*>& bottom,
++    const vector<Blob<Dtype>*>& top) {
++  const int count = top[1]->count();
++  const Dtype* C_prev = bottom[0]->gpu_data();
++  const Dtype* X = bottom[1]->gpu_data();
++  const Dtype* flush = bottom[2]->gpu_data();
++  Dtype* X_acts = X_acts_.mutable_gpu_data();
++  Dtype* C = top[0]->mutable_gpu_data();
++  Dtype* H = top[1]->mutable_gpu_data();
++  const int X_count = bottom[1]->count();
++  // NOLINT_NEXT_LINE(whitespace/operators)
++  LSTMActsForward<Dtype><<<CAFFE_GET_BLOCKS(X_count), CAFFE_CUDA_NUM_THREADS>>>(
++      X_count, hidden_dim_, X, X_acts);
++  CUDA_POST_KERNEL_CHECK;
++  // NOLINT_NEXT_LINE(whitespace/operators)
++  LSTMUnitForward<Dtype><<<CAFFE_GET_BLOCKS(count), CAFFE_CUDA_NUM_THREADS>>>(
++      count, hidden_dim_, C_prev, X_acts, flush, C, H);
++  CUDA_POST_KERNEL_CHECK;
++}
++
++template <typename Dtype>
++__global__ void LSTMUnitBackward(const int nthreads, const int dim,
++    const Dtype* C_prev, const Dtype* X, const Dtype* C, const Dtype* H,
++    const Dtype* flush, const Dtype* C_diff, const Dtype* H_diff,
++    Dtype* C_prev_diff, Dtype* X_diff) {
++  CUDA_KERNEL_LOOP(index, nthreads) {
++    const int n = index / dim;
++    const int d = index % dim;
++    const Dtype* X_offset = X + 4 * dim * n;
++    const Dtype i = X_offset[d];
++    const Dtype f = X_offset[1 * dim + d];
++    const Dtype o = X_offset[2 * dim + d];
++    const Dtype g = X_offset[3 * dim + d];
++    const Dtype c_prev = C_prev[index];
++    const Dtype c = C[index];
++    const Dtype tanh_c = tanh(c);
++    Dtype* c_prev_diff = C_prev_diff + index;
++    Dtype* X_diff_offset = X_diff + 4 * dim * n;
++    Dtype* i_diff = X_diff_offset + d;
++    Dtype* f_diff = X_diff_offset + 1 * dim + d;
++    Dtype* o_diff = X_diff_offset + 2 * dim + d;
++    Dtype* g_diff = X_diff_offset + 3 * dim + d;
++    const Dtype c_term_diff =
++        C_diff[index] + H_diff[index] * o * (1 - tanh_c * tanh_c);
++    const Dtype flush_n = flush[n];
++    *c_prev_diff = flush_n * c_term_diff * f;
++    *i_diff = c_term_diff * g;
++    *f_diff = flush_n * c_term_diff * c_prev;
++    *o_diff = H_diff[index] * tanh_c;
++    *g_diff = c_term_diff * i;
++  }
++}
++
++template <typename Dtype>
++__global__ void LSTMActsBackward(const int nthreads, const int dim,
++    const Dtype* X_acts, const Dtype* X_acts_diff, Dtype* X_diff) {
++  CUDA_KERNEL_LOOP(index, nthreads) {
++    const int x_dim = 4 * dim;
++    const int d = index % x_dim;
++    const Dtype X_act = X_acts[index];
++    if (d < 3 * dim) {
++      X_diff[index] = X_acts_diff[index] * X_act * (Dtype(1) - X_act);
++    } else {
++      X_diff[index] = X_acts_diff[index] * (Dtype(1) - X_act * X_act);
++    }
++  }
++}
++
++template <typename Dtype>
++void LSTMUnitLayer<Dtype>::Backward_gpu(const vector<Blob<Dtype>*>& top,
++    const vector<bool>& propagate_down,
++    const vector<Blob<Dtype>*>& bottom) {
++  CHECK(!propagate_down[2]) << "Cannot backpropagate to sequence indicators.";
++  if (!propagate_down[0] && !propagate_down[1]) { return; }
++
++  const int count = top[1]->count();
++  const Dtype* C_prev = bottom[0]->gpu_data();
++  const Dtype* X_acts = X_acts_.gpu_data();
++  const Dtype* flush = bottom[2]->gpu_data();
++  const Dtype* C = top[0]->gpu_data();
++  const Dtype* H = top[1]->gpu_data();
++  const Dtype* C_diff = top[0]->gpu_diff();
++  const Dtype* H_diff = top[1]->gpu_diff();
++  Dtype* C_prev_diff = bottom[0]->mutable_gpu_diff();
++  Dtype* X_acts_diff = X_acts_.mutable_gpu_diff();
++  LSTMUnitBackward<Dtype>  // NOLINT_NEXT_LINE(whitespace/operators)
++      <<<CAFFE_GET_BLOCKS(count), CAFFE_CUDA_NUM_THREADS>>>(count, hidden_dim_,
++      C_prev, X_acts, C, H, flush, C_diff, H_diff, C_prev_diff, X_acts_diff);
++  CUDA_POST_KERNEL_CHECK;
++  const int X_count = bottom[1]->count();
++  Dtype* X_diff = bottom[1]->mutable_gpu_diff();
++  LSTMActsBackward<Dtype>  // NOLINT_NEXT_LINE(whitespace/operators)
++      <<<CAFFE_GET_BLOCKS(X_count), CAFFE_CUDA_NUM_THREADS>>>(
++      X_count, hidden_dim_, X_acts, X_acts_diff, X_diff);
++  CUDA_POST_KERNEL_CHECK;
++}
++
++INSTANTIATE_LAYER_GPU_FUNCS(LSTMUnitLayer);
++
++}  // namespace caffe
+diff --git a/src/caffe/layers/tempo_crop_layer.cpp b/src/caffe/layers/tempo_crop_layer.cpp
+new file mode 100644
+index 0000000..6571bc3
+--- /dev/null
++++ b/src/caffe/layers/tempo_crop_layer.cpp
+@@ -0,0 +1,88 @@
++#include <algorithm>
++#include <cfloat>
++#include <cmath>
++#include <vector>
++
++#include "caffe/layer.hpp"
++#include "caffe/util/io.hpp"
++#include "caffe/util/rng.hpp"
++#include "caffe/util/math_functions.hpp"
++#include "caffe/tempo_crop_layer.hpp"
++
++namespace caffe {
++
++template <typename Dtype>
++int TempoCropLayer<Dtype>::Rand() {
++  CHECK(rng_);
++  rng_t* rng = static_cast<caffe::rng_t*>(rng_->generator());
++  return (*rng)();
++}
++
++template <typename Dtype>
++void TempoCropLayer<Dtype>::LayerSetUp(const vector<Blob<Dtype>*>& bottom,
++    const vector<Blob<Dtype>*>& top) {
++  input_length_ = this->layer_param_.tempo_crop_param().input_length();
++  output_length_ = this->layer_param_.tempo_crop_param().output_length();
++
++  CHECK_GE(output_length_, 0) << "output_length should be greater than zero";
++  CHECK_LE(output_length_, input_length_) << "output_length can be greater than input_length";
++
++  const unsigned int rng_seed = caffe_rng_rand();
++  rng_.reset(new Caffe::RNG(rng_seed));
++}
++
++template <typename Dtype>
++void TempoCropLayer<Dtype>::Reshape(const vector<Blob<Dtype>*>& bottom,
++    const vector<Blob<Dtype>*>& top) {
++  count_ = bottom[0]->count();
++  CHECK_EQ(count_ % input_length_, 0) << "number of elements of bottom[0]: " << count_ << " is not divisible by input_length: " << input_length_;
++
++  num_sequences_ = count_ / input_length_;
++  top[0]->ReshapeLike(*bottom[0]);
++
++  // init the top_data data, so that the filter layer can infer the right top shape
++  Dtype* top_data = top[0]->mutable_cpu_data();
++  caffe_set(top[0]->count(), Dtype(0.0), top_data);
++  for (int i = 0; i < output_length_*num_sequences_; i++) {
++    top_data[i] = Dtype(1.0);
++  }
++}
++
++template <typename Dtype>
++void TempoCropLayer<Dtype>::Forward_cpu(const vector<Blob<Dtype>*>& bottom,
++    const vector<Blob<Dtype>*>& top) {
++  const Dtype* bottom_data = bottom[0]->cpu_data();
++  Dtype* top_data = top[0]->mutable_cpu_data();
++
++  // for each sequence
++  caffe_set(count_, Dtype(0.0), top_data);
++  for (int i = 0; i < num_sequences_; i++) {
++    const Dtype *in = bottom_data + i * input_length_;
++    Dtype *out = top_data + i * input_length_;
++
++    int sid = 0;
++    // search the first 1
++    while(in[sid] == Dtype(0)) sid++;
++
++    // the rightmost starting point
++    int eid = input_length_ - output_length_;
++
++    // the number of choices
++    int num_choices = eid - sid + 1;
++    if (num_choices > 1) {
++      // random chose a starting point
++      int rng = Rand();
++      rng = rng>0?rng:-rng;
++      eid = sid + rng % num_choices;
++
++    }
++    for (int j = 0; j < output_length_; j++) {
++      out[eid + j] = Dtype(1.0);
++    }
++  }
++}
++
++INSTANTIATE_CLASS(TempoCropLayer);
++REGISTER_LAYER_CLASS(TempoCrop);
++
++}  // namespace caffe
+diff --git a/src/caffe/net.cpp b/src/caffe/net.cpp
+index 23d94c9..f7e477d 100644
+--- a/src/caffe/net.cpp
++++ b/src/caffe/net.cpp
+@@ -739,6 +739,42 @@ void Net<Dtype>::Reshape() {
+ }
+ 
+ template <typename Dtype>
++void Net<Dtype>::CopyTrainedLayersByName(const NetParameter& param) {
++    map<string, BlobProto> param_map;
++    int num_source_layers = param.layer_size();
++    for (int i = 0; i < num_source_layers; ++i) {
++        const LayerParameter& source_layer = param.layer(i);
++        if (source_layer.param_size() > 0)
++        {
++            for (int j = 0; j < source_layer.param_size(); j++) {
++                string name = source_layer.param(j).name();
++                if (param_map.find(name) == param_map.end())
++                    param_map[name] = source_layer.blobs(j);
++            }
++        }
++    }
++    int total_params = 0;
++    for (int i = 0; i < params_.size(); i++) {
++        if (param_owners_[i] < 0)
++            ++total_params;
++    }
++
++    int loaded = 0;
++
++    for (std::map<string,BlobProto>::iterator it=param_map.begin(); it!=param_map.end(); ++it)
++    {
++        if (param_names_index_.find(it -> first) != param_names_index_.end())
++        {
++            LOG(INFO) << "loading named parameter: " << it -> first << " Shape: " << params_[param_names_index_[it -> first]] -> shape_string() << " and " << (it -> second).data_size();
++            params_[param_names_index_[it -> first]] -> FromProto(it -> second, false);
++            ++loaded;
++        }
++    }
++
++    LOG(INFO) << "loaded: " << loaded << " total: " << total_params;
++}
++
++template <typename Dtype>
+ void Net<Dtype>::CopyTrainedLayersFrom(const NetParameter& param) {
+   int num_source_layers = param.layer_size();
+   for (int i = 0; i < num_source_layers; ++i) {
+@@ -777,21 +813,24 @@ void Net<Dtype>::CopyTrainedLayersFrom(const NetParameter& param) {
+ }
+ 
+ template <typename Dtype>
+-void Net<Dtype>::CopyTrainedLayersFrom(const string trained_filename) {
++void Net<Dtype>::CopyTrainedLayersFrom(const string trained_filename, bool byname /* = false*/) {
+   if (trained_filename.size() >= 3 &&
+       trained_filename.compare(trained_filename.size() - 3, 3, ".h5") == 0) {
+     CopyTrainedLayersFromHDF5(trained_filename);
+   } else {
+-    CopyTrainedLayersFromBinaryProto(trained_filename);
++    CopyTrainedLayersFromBinaryProto(trained_filename, byname);
+   }
+ }
+ 
+ template <typename Dtype>
+ void Net<Dtype>::CopyTrainedLayersFromBinaryProto(
+-    const string trained_filename) {
++    const string trained_filename, bool byname /* = false */) {
+   NetParameter param;
+   ReadNetParamsFromBinaryFileOrDie(trained_filename, &param);
+-  CopyTrainedLayersFrom(param);
++  if (byname)
++    CopyTrainedLayersByName(param);
++  else
++    CopyTrainedLayersFrom(param);
+ }
+ 
+ template <typename Dtype>
+@@ -851,6 +890,20 @@ void Net<Dtype>::ToProto(NetParameter* param, bool write_diff) const {
+   // Add bottom and top
+   DLOG(INFO) << "Serializing " << layers_.size() << " layers";
+   for (int i = 0; i < layers_.size(); ++i) {
++
++        // bypass layer save in two cases:
++        // 1. no parameters, in which case param_id_vecs_[i].size() = 0
++        // 2. no parameters ownered by itself
++      bool do_save = false;
++      for (int j = 0; j < param_id_vecs_[i].size(); j++) {
++          if (param_owners_[param_id_vecs_[i][j]] < 0)
++              do_save = true;
++      }
++      if (!do_save)
++          continue;
++      else
++          LOG(INFO) << "Saving ..." << layers_[i] -> layer_param().name();
++
+     LayerParameter* layer_param = param->add_layer();
+     layers_[i]->ToProto(layer_param, write_diff);
+   }
+diff --git a/src/caffe/proto/caffe.proto b/src/caffe/proto/caffe.proto
+index 3b27bbd..1ada6ba 100644
+--- a/src/caffe/proto/caffe.proto
++++ b/src/caffe/proto/caffe.proto
+@@ -153,6 +153,7 @@ message SolverParameter {
+   optional int32 max_iter = 7; // the maximum number of iterations
+   // accumulate gradients over `iter_size` x `batch_size` instances
+   optional int32 iter_size = 36 [default = 1];
++  optional bool snapshot_solver = 370 [default = true];
+ 
+   // The learning rate decay policy. The currently implemented learning rate
+   // policies are as follows:
+@@ -395,6 +396,12 @@ message LayerParameter {
+   optional ThresholdParameter threshold_param = 128;
+   optional TileParameter tile_param = 138;
+   optional WindowDataParameter window_data_param = 129;
++  optional TempoCropParameter tempo_crop_param = 140;
++}
++
++message TempoCropParameter {
++  optional uint32 input_length = 1 [default = 0];
++  optional uint32 output_length = 2 [default = 0];
+ }
+ 
+ // Message that stores parameters used to apply transformation
+@@ -630,6 +637,8 @@ message DataParameter {
+   // Prefetch queue (Number of batches to prefetch to host memory, increase if
+   // data access bandwidth varies).
+   optional uint32 prefetch = 10 [default = 4];
++  // whether the data transformation is shared across data batch
++  optional bool share_crop = 11 [default = false];
+ }
+ 
+ message DropoutParameter {
+@@ -655,6 +664,7 @@ message DummyDataParameter {
+   repeated uint32 width = 5;
+ }
+ 
++// Message that stores parameters used by EltwiseLayer
+ message EltwiseParameter {
+   enum EltwiseOp {
+     PROD = 0;
+@@ -667,12 +677,16 @@ message EltwiseParameter {
+   // Whether to use an asymptotically slower (for >2 inputs) but stabler method
+   // of computing the gradient for the PROD operation. (No effect for SUM op.)
+   optional bool stable_prod_grad = 3 [default = true];
++
++  // If true and the EltwiseOp is SUM, the last bottom blob is a singleton
++  // coefficient for the first N-1 bottom blobs, with shape (N-1, 1, 1, 1).
++  optional bool coeff_blob = 4 [default = false];
+ }
+ 
+ // Message that stores parameters used by ELULayer
+ message ELUParameter {
+   // Described in:
+-  // Clevert, D.-A., Unterthiner, T., & Hochreiter, S. (2015). Fast and Accurate 
++  // Clevert, D.-A., Unterthiner, T., & Hochreiter, S. (2015). Fast and Accurate
+   // Deep Network Learning by Exponential Linear Units (ELUs). arXiv
+   optional float alpha = 1 [default = 1];
+ }
+diff --git a/src/caffe/test/test_data_transformer.cpp b/src/caffe/test/test_data_transformer.cpp
+index 31bf1c1..662a3fd 100644
+--- a/src/caffe/test/test_data_transformer.cpp
++++ b/src/caffe/test/test_data_transformer.cpp
+@@ -51,6 +51,10 @@ class DataTransformTest : public ::testing::Test {
+     vector<vector<Dtype> > crop_sequence;
+     for (int iter = 0; iter < this->num_iter_; ++iter) {
+       vector<Dtype> iter_crop_sequence;
++      transformer->Transform(datum, blob);
++      for (int j = 0; j < blob->count(); ++j) {
++        iter_crop_sequence.push_back(blob->cpu_data()[j]);
++      transformer.Reset();
+       transformer.Transform(datum, &blob);
+       for (int j = 0; j < blob.count(); ++j) {
+         iter_crop_sequence.push_back(blob.cpu_data()[j]);
+@@ -61,6 +65,7 @@ class DataTransformTest : public ::testing::Test {
+     int num_sequence_matches = 0;
+     for (int iter = 0; iter < this->num_iter_; ++iter) {
+       vector<Dtype> iter_crop_sequence = crop_sequence[iter];
++      transformer.Reset();
+       transformer.Transform(datum, &blob);
+       for (int j = 0; j < blob.count(); ++j) {
+         num_sequence_matches += (crop_sequence[iter][j] == blob.cpu_data()[j]);
+@@ -88,6 +93,7 @@ TYPED_TEST(DataTransformTest, TestEmptyTransform) {
+   Blob<TypeParam> blob(1, channels, height, width);
+   DataTransformer<TypeParam> transformer(transform_param, TEST);
+   transformer.InitRand();
++  transformer.Reset();
+   transformer.Transform(datum, &blob);
+   EXPECT_EQ(blob.num(), 1);
+   EXPECT_EQ(blob.channels(), datum.channels());
+@@ -111,6 +117,7 @@ TYPED_TEST(DataTransformTest, TestEmptyTransformUniquePixels) {
+   Blob<TypeParam> blob(1, 3, 4, 5);
+   DataTransformer<TypeParam> transformer(transform_param, TEST);
+   transformer.InitRand();
++  transformer.Reset();
+   transformer.Transform(datum, &blob);
+   EXPECT_EQ(blob.num(), 1);
+   EXPECT_EQ(blob.channels(), datum.channels());
+@@ -137,6 +144,7 @@ TYPED_TEST(DataTransformTest, TestCropSize) {
+   transformer.InitRand();
+   Blob<TypeParam> blob(1, channels, crop_size, crop_size);
+   for (int iter = 0; iter < this->num_iter_; ++iter) {
++    transformer.Reset();
+     transformer.Transform(datum, &blob);
+     EXPECT_EQ(blob.num(), 1);
+     EXPECT_EQ(blob.channels(), datum.channels());
+@@ -273,6 +281,7 @@ TYPED_TEST(DataTransformTest, TestMeanValue) {
+   Blob<TypeParam> blob(1, channels, height, width);
+   DataTransformer<TypeParam> transformer(transform_param, TEST);
+   transformer.InitRand();
++  transformer.Reset();
+   transformer.Transform(datum, &blob);
+   for (int j = 0; j < blob.count(); ++j) {
+     EXPECT_EQ(blob.cpu_data()[j], label - mean_value);
+@@ -292,9 +301,11 @@ TYPED_TEST(DataTransformTest, TestMeanValues) {
+   transform_param.add_mean_value(2);
+   Datum datum;
+   FillDatum(label, channels, height, width, unique_pixels, &datum);
++  transformer->Transform(datum, blob);
+   Blob<TypeParam> blob(1, channels, height, width);
+   DataTransformer<TypeParam> transformer(transform_param, TEST);
+   transformer.InitRand();
++  transformer.Reset();
+   transformer.Transform(datum, &blob);
+   for (int c = 0; c < channels; ++c) {
+     for (int j = 0; j < height * width; ++j) {
+@@ -334,6 +345,7 @@ TYPED_TEST(DataTransformTest, TestMeanFile) {
+   Blob<TypeParam> blob(1, channels, height, width);
+   DataTransformer<TypeParam> transformer(transform_param, TEST);
+   transformer.InitRand();
++  transformer.Reset();
+   transformer.Transform(datum, &blob);
+   for (int j = 0; j < blob.count(); ++j) {
+     EXPECT_EQ(blob.cpu_data()[j], 0);
+diff --git a/src/caffe/test/test_eltwise_layer.cpp b/src/caffe/test/test_eltwise_layer.cpp
+index c06e3ba..dba3c51 100644
+--- a/src/caffe/test/test_eltwise_layer.cpp
++++ b/src/caffe/test/test_eltwise_layer.cpp
+@@ -22,14 +22,18 @@ class EltwiseLayerTest : public MultiDeviceTest<TypeParam> {
+       : blob_bottom_a_(new Blob<Dtype>(2, 3, 4, 5)),
+         blob_bottom_b_(new Blob<Dtype>(2, 3, 4, 5)),
+         blob_bottom_c_(new Blob<Dtype>(2, 3, 4, 5)),
++        blob_bottom_coeff_(new Blob<Dtype>()),
+         blob_top_(new Blob<Dtype>()) {
+-    // fill the values
++    vector<int> coeff_shape(2);
++    coeff_shape[0] = 3; coeff_shape[1] = 2;
++    blob_bottom_coeff_->Reshape(coeff_shape);
+     Caffe::set_random_seed(1701);
+     FillerParameter filler_param;
+     UniformFiller<Dtype> filler(filler_param);
+     filler.Fill(this->blob_bottom_a_);
+     filler.Fill(this->blob_bottom_b_);
+     filler.Fill(this->blob_bottom_c_);
++    filler.Fill(this->blob_bottom_coeff_);
+     blob_bottom_vec_.push_back(blob_bottom_a_);
+     blob_bottom_vec_.push_back(blob_bottom_b_);
+     blob_bottom_vec_.push_back(blob_bottom_c_);
+@@ -39,11 +43,13 @@ class EltwiseLayerTest : public MultiDeviceTest<TypeParam> {
+     delete blob_bottom_a_;
+     delete blob_bottom_b_;
+     delete blob_bottom_c_;
++    delete blob_bottom_coeff_;
+     delete blob_top_;
+   }
+   Blob<Dtype>* const blob_bottom_a_;
+   Blob<Dtype>* const blob_bottom_b_;
+   Blob<Dtype>* const blob_bottom_c_;
++  Blob<Dtype>* const blob_bottom_coeff_;
+   Blob<Dtype>* const blob_top_;
+   vector<Blob<Dtype>*> blob_bottom_vec_;
+   vector<Blob<Dtype>*> blob_top_vec_;
+@@ -126,6 +132,37 @@ TYPED_TEST(EltwiseLayerTest, TestSumCoeff) {
+   }
+ }
+ 
++TYPED_TEST(EltwiseLayerTest, TestSumBlobCoeff) {
++  typedef typename TypeParam::Dtype Dtype;
++  LayerParameter layer_param;
++  EltwiseParameter* eltwise_param = layer_param.mutable_eltwise_param();
++  eltwise_param->set_operation(EltwiseParameter_EltwiseOp_SUM);
++  eltwise_param->set_coeff_blob(true);
++  eltwise_param->add_coeff(1);
++  eltwise_param->add_coeff(-0.5);
++  eltwise_param->add_coeff(2);
++  shared_ptr<EltwiseLayer<Dtype> > layer(
++      new EltwiseLayer<Dtype>(layer_param));
++  this->blob_bottom_vec_.push_back(this->blob_bottom_coeff_);
++  layer->SetUp(this->blob_bottom_vec_, this->blob_top_vec_);
++  layer->Forward(this->blob_bottom_vec_, this->blob_top_vec_);
++  const Dtype* data = this->blob_top_->cpu_data();
++  const int count = this->blob_top_->count();
++  const int num = this->blob_top_->num();
++  const int dim = count / num;
++  const Dtype* coeff_data = this->blob_bottom_coeff_->cpu_data();
++  for (int n = 0; n < num; ++n) {
++    for (int d = 0; d < dim; ++d) {
++      Dtype sum = 0;
++      for (int i = 0; i < this->blob_bottom_vec_.size() - 1; ++i) {
++        const Dtype coeff = coeff_data[i * num + n] * eltwise_param->coeff(i);
++        sum += coeff * this->blob_bottom_vec_[i]->cpu_data()[n * dim + d];
++      }
++      EXPECT_NEAR(data[n * dim + d], sum, 1e-4);
++    }
++  }
++}
++
+ TYPED_TEST(EltwiseLayerTest, TestStableProdGradient) {
+   typedef typename TypeParam::Dtype Dtype;
+   LayerParameter layer_param;
+@@ -175,6 +212,26 @@ TYPED_TEST(EltwiseLayerTest, TestSumCoeffGradient) {
+       this->blob_top_vec_);
+ }
+ 
++TYPED_TEST(EltwiseLayerTest, TestSumBlobCoeffGradient) {
++  typedef typename TypeParam::Dtype Dtype;
++  LayerParameter layer_param;
++  EltwiseParameter* eltwise_param = layer_param.mutable_eltwise_param();
++  eltwise_param->set_operation(EltwiseParameter_EltwiseOp_SUM);
++  eltwise_param->set_coeff_blob(true);
++  eltwise_param->add_coeff(1);
++  eltwise_param->add_coeff(-0.5);
++  eltwise_param->add_coeff(2);
++  EltwiseLayer<Dtype> layer(layer_param);
++  this->blob_bottom_vec_.push_back(this->blob_bottom_coeff_);
++  GradientChecker<Dtype> checker(1e-2, 1e-3);
++  checker.CheckGradientExhaustive(&layer, this->blob_bottom_vec_,
++      this->blob_top_vec_, 0);
++  checker.CheckGradientExhaustive(&layer, this->blob_bottom_vec_,
++      this->blob_top_vec_, 1);
++  checker.CheckGradientExhaustive(&layer, this->blob_bottom_vec_,
++      this->blob_top_vec_, 2);
++}
++
+ TYPED_TEST(EltwiseLayerTest, TestMax) {
+   typedef typename TypeParam::Dtype Dtype;
+   LayerParameter layer_param;
+diff --git a/src/caffe/test/test_lstm_unit_layer.cpp b/src/caffe/test/test_lstm_unit_layer.cpp
+new file mode 100644
+index 0000000..cbd66c7
+--- /dev/null
++++ b/src/caffe/test/test_lstm_unit_layer.cpp
+@@ -0,0 +1,93 @@
++#include <cstring>
++#include <vector>
++
++#include "gtest/gtest.h"
++
++#include "caffe/blob.hpp"
++#include "caffe/common.hpp"
++#include "caffe/filler.hpp"
++#include "caffe/layers/lstm_unit_layer.hpp"
++
++#include "caffe/test/test_caffe_main.hpp"
++#include "caffe/test/test_gradient_check_util.hpp"
++
++namespace caffe {
++
++template <typename TypeParam>
++class LSTMUnitLayerTest : public MultiDeviceTest<TypeParam> {
++  typedef typename TypeParam::Dtype Dtype;
++
++ protected:
++  LSTMUnitLayerTest()
++      : blob_bottom_0_(new Blob<Dtype>()), // prev-c
++        blob_bottom_1_(new Blob<Dtype>()), // input and memory
++        blob_bottom_2_(new Blob<Dtype>()), // cont flags
++        blob_top_0_(new Blob<Dtype>()),
++        blob_top_1_(new Blob<Dtype>()) {}
++  virtual void SetUp() {
++    // fill the values
++    //Caffe::set_random_seed(1701);
++    vector<int> shape;
++    shape.push_back(6);
++    shape.push_back(1);
++    shape.push_back(5);
++
++    blob_bottom_0_ -> Reshape(shape);
++    shape[2] = 20;
++    blob_bottom_1_ -> Reshape(shape);
++    shape.pop_back();
++    blob_bottom_2_ -> Reshape(shape);
++
++    FillerParameter filler_param;
++    GaussianFiller<Dtype> filler(filler_param);
++    filler.Fill(this->blob_bottom_0_);
++    filler.Fill(this->blob_bottom_1_);
++
++    FillerParameter filler2_param;
++    filler2_param.set_min(0);
++    filler2_param.set_max(1);
++    UniformFiller<Dtype> filler2(filler2_param);
++    filler2.Fill(this->blob_bottom_2_);
++    Dtype *p = this -> blob_bottom_2_ -> mutable_cpu_data();
++    for (int i = 0; i < this -> blob_bottom_2_ -> count(); i++) {
++        p[i] = p[i] > .5?Dtype(1):Dtype(0);
++    }
++
++    blob_top_vec_.push_back(blob_top_0_);
++    blob_top_vec_.push_back(blob_top_1_);
++    blob_bottom_vec_.push_back(blob_bottom_0_);
++    blob_bottom_vec_.push_back(blob_bottom_1_);
++    blob_bottom_vec_.push_back(blob_bottom_2_);
++  }
++
++  virtual ~LSTMUnitLayerTest() {
++    delete blob_top_0_; delete blob_top_1_;
++    delete blob_bottom_0_;
++    delete blob_bottom_1_;
++    delete blob_bottom_2_;
++  }
++
++  Blob<Dtype>* const blob_bottom_0_;
++  Blob<Dtype>* const blob_bottom_1_;
++  Blob<Dtype>* const blob_bottom_2_;
++  Blob<Dtype>* const blob_top_0_;
++  Blob<Dtype>* const blob_top_1_;
++
++  vector<Blob<Dtype>*> blob_top_vec_;
++  vector<Blob<Dtype>*> blob_bottom_vec_;
++};
++
++TYPED_TEST_CASE(LSTMUnitLayerTest, TestDtypesAndDevices);
++
++TYPED_TEST(LSTMUnitLayerTest, TestGradient) {
++  typedef typename TypeParam::Dtype Dtype;
++  LayerParameter layer_param;
++  LSTMUnitLayer<Dtype> layer(layer_param);
++  GradientChecker<Dtype> checker(1e-2, 1e-3);
++  checker.CheckGradientExhaustive(&layer, this->blob_bottom_vec_,
++    this->blob_top_vec_, 0);
++  checker.CheckGradientExhaustive(&layer, this->blob_bottom_vec_,
++    this->blob_top_vec_, 1);
++}
++
++}  // namespace caffe
+diff --git a/src/caffe/test/test_tempo_crop_layer.cpp b/src/caffe/test/test_tempo_crop_layer.cpp
+new file mode 100644
+index 0000000..cd2b0ff
+--- /dev/null
++++ b/src/caffe/test/test_tempo_crop_layer.cpp
+@@ -0,0 +1,131 @@
++#include <cmath>
++#include <cstdlib>
++#include <cstring>
++#include <vector>
++
++#include "gtest/gtest.h"
++
++#include "caffe/blob.hpp"
++#include "caffe/common.hpp"
++#include "caffe/filler.hpp"
++#include "caffe/tempo_crop_layer.hpp"
++#include "caffe/util/rng.hpp"
++
++#include "caffe/test/test_caffe_main.hpp"
++
++namespace caffe {
++
++template <typename TypeParam>
++  class TempoCropLayerTest : public MultiDeviceTest<TypeParam> {
++    typedef typename TypeParam::Dtype Dtype;
++
++  protected:
++    TempoCropLayerTest():blob_bottom_data_(new Blob<Dtype>()),
++    blob_top_mask_(new Blob<Dtype>()),
++    input_length_(20),output_length_(10),num_sequences_(10) {
++
++      vector<int> input_shape(1);
++      input_shape[0] = input_length_ * num_sequences_;
++      blob_bottom_data_->Reshape(input_shape);
++      Dtype* input_data = blob_bottom_data_->mutable_cpu_data();
++      caffe_set(input_shape[0], Dtype(0.0), input_data);
++
++      const unsigned int prefetch_rng_seed = caffe_rng_rand();
++
++      shared_ptr<Caffe::RNG> rng(new Caffe::RNG(prefetch_rng_seed));
++      caffe::rng_t* prefetch_rng =
++        static_cast<caffe::rng_t*>(rng->generator());
++
++      for (int i = 0; i < num_sequences_; i++) {
++        int n_labels = (*prefetch_rng)() % (input_length_- 1) + 1;
++        Dtype* in = input_data + i * input_length_;
++        for (int j = 1; j <= n_labels; j++) {
++          in[input_length_-j] = Dtype(1.0);
++        }
++      }
++
++      blob_bottom_vec_.push_back(blob_bottom_data_);
++      blob_top_vec_.push_back(blob_top_mask_);
++    }
++    virtual ~TempoCropLayerTest() {
++      delete blob_bottom_data_;
++      delete blob_top_mask_;
++    }
++    Blob<Dtype>* blob_bottom_data_;
++    Blob<Dtype>* blob_top_mask_;
++    const int input_length_;
++    const int output_length_;
++    const int num_sequences_;
++    vector<Blob<Dtype>*> blob_bottom_vec_;
++    vector<Blob<Dtype>*> blob_top_vec_;
++  };
++
++TYPED_TEST_CASE(TempoCropLayerTest, TestDtypesAndDevices);
++
++TYPED_TEST(TempoCropLayerTest, TestOutput) {
++  typedef typename TypeParam::Dtype Dtype;
++  LayerParameter layer_param;
++  TempoCropParameter* tempo_crop_param = layer_param.mutable_tempo_crop_param();
++  tempo_crop_param->set_input_length(this->input_length_);
++  tempo_crop_param->set_output_length(this->output_length_);
++
++  TempoCropLayer<Dtype> layer(layer_param);
++
++  layer.SetUp(this->blob_bottom_vec_, this->blob_top_vec_);
++  layer.Forward(this->blob_bottom_vec_, this->blob_top_vec_);
++
++  const Dtype* bottom_data = this->blob_bottom_data_->cpu_data();
++  const Dtype* top_data = this->blob_top_mask_->cpu_data();
++
++  // number of elements not changing
++  CHECK_EQ(this->blob_top_mask_->count(), this->blob_bottom_data_->count());
++
++
++  for (int i = 0; i < this->num_sequences_; i++) {
++    const Dtype* in = bottom_data + i * this->input_length_;
++    const Dtype* out = top_data + i * this->input_length_;
++
++    vector<Dtype> filtered;
++    int sum_in_mask = 0;
++    int sum_in_output = 0;
++    for (int j = 0; j < this->input_length_; j++) {
++      if (out[j] == Dtype(1.0)) {
++        filtered.push_back(in[j]);
++      }
++      sum_in_mask += in[j];
++      sum_in_output += out[j];
++    }
++    // the filtered vector length should be exactly output_length_
++    CHECK_EQ(sum_in_output, this->output_length_);
++    CHECK_EQ(filtered.size(), this->output_length_);
++
++    // the filtered vector should be left padded
++    int left_pad = 0;
++    while(filtered[left_pad]==Dtype(0.0)) left_pad++;
++    int sum_in_filtered = 0;
++    for (;left_pad < filtered.size(); left_pad++) {
++      CHECK_EQ(filtered[left_pad], Dtype(1.0));
++      sum_in_filtered += 1;
++    }
++
++    // if the sum_in_mask not smaller than output_length, the sum_in_filtered should be exactly output_length_
++    if (sum_in_mask >= this->output_length_)
++      CHECK_EQ(sum_in_filtered, this->output_length_);
++    else
++      CHECK_LT(sum_in_filtered, this->output_length_);
++
++    // should be sampled continously
++    left_pad = 0;
++    while(out[left_pad] == Dtype(0.0)) left_pad++ ;
++
++    int right_pad = this->input_length_-1;
++    while(out[right_pad] == Dtype(0.0)) right_pad--;
++
++    while(left_pad<=right_pad) {
++      CHECK_EQ(out[left_pad], Dtype(1.0));
++      ++left_pad;
++    }
++  }
++}
++
++}  // namespace caffe
+diff --git a/tools/caffe.cpp b/tools/caffe.cpp
+index 95b2f82..03a27f8 100644
+--- a/tools/caffe.cpp
++++ b/tools/caffe.cpp
+@@ -39,6 +39,9 @@ DEFINE_string(snapshot, "",
+ DEFINE_string(weights, "",
+     "Optional; the pretrained weights to initialize finetuning, "
+     "separated by ','. Cannot be set simultaneously with snapshot.");
++DEFINE_string(flags, "",
++    "Optional; 0: layer name based loading (default). 1: param name based loading"
++    "if set, the number of flags should be equal to the pretrained weights to initialize finetuning. (Multiple values are seperated by comma");
+ DEFINE_int32(iterations, 50,
+     "The number of iterations to run.");
+ DEFINE_string(sigint_effect, "stop",
+@@ -122,14 +125,23 @@ RegisterBrewFunction(device_query);
+ 
+ // Load the weights from the specified caffemodel(s) into the train and
+ // test nets.
+-void CopyLayers(caffe::Solver<float>* solver, const std::string& model_list) {
++void CopyLayers(caffe::Solver<float>* solver, const std::string& model_list, const std::string &model_flags) {
+   std::vector<std::string> model_names;
+   boost::split(model_names, model_list, boost::is_any_of(",") );
++
++  std::vector<std::string> flags;
++  if (model_flags.size() > 0)
++    boost::split(flags, model_flags, boost::is_any_of(",") );
++
+   for (int i = 0; i < model_names.size(); ++i) {
+     LOG(INFO) << "Finetuning from " << model_names[i];
+-    solver->net()->CopyTrainedLayersFrom(model_names[i]);
++    bool byname = false;
++    if (flags.size() > 0 && flags[i] == "1")
++        byname = true;
++
++    solver->net()->CopyTrainedLayersFrom(model_names[i], byname);
+     for (int j = 0; j < solver->test_nets().size(); ++j) {
+-      solver->test_nets()[j]->CopyTrainedLayersFrom(model_names[i]);
++      solver->test_nets()[j]->CopyTrainedLayersFrom(model_names[i], byname);
+     }
+   }
+ }
+@@ -209,7 +221,7 @@ int train() {
+     LOG(INFO) << "Resuming from " << FLAGS_snapshot;
+     solver->Restore(FLAGS_snapshot.c_str());
+   } else if (FLAGS_weights.size()) {
+-    CopyLayers(solver.get(), FLAGS_weights);
++    CopyLayers(&*solver, FLAGS_weights, FLAGS_flags);
+   }
+ 
+   if (gpus.size() > 1) {

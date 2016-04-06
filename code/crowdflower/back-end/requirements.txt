@@ -1,0 +1,7 @@
+3to2
+language_check
+requests
+flask
+flask-jsonpify
+nltk
+gunicorn

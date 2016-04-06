@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+        <meta name="keywords" content="" />
+        <meta name="description" content="" />
+        <meta name="generator" content="gvim" />
+        <meta name="author" content="" />
+        <link rel="stylesheet" type="text/css" href="{{ url_for('static', filename='view.css') }}">
+        <title>Temp</title>
+    </head>
+    <body>
+        <img src="{{url_for('static', filename = 'gif/%s.gif' % url)}}" alt="gif" height=256/>
+        <h1>{{sent}}</h1>
+        <h2><a href="/{{rd}}">Give up and go to a random One</a></h2>
+        {% from "_formhelper.html" import render_field %}
+        <form method=post action="#">
+            <p><input type=submit value=Submit class='submit' >
+            <dl>
+                {{ form.hidden_tag() }}
+                {%for field in form%}
+                {% if 'csrf' not in field.label.text.lower() %}
+                    {{ render_field(field) }}
+                {% endif %}
+                {%endfor%}
+            </dl>
+        </form>
+    </body>
+</html>

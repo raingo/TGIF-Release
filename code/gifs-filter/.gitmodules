@@ -1,0 +1,6 @@
+[submodule "dedup/pHash-0.9.6"]
+	path = dedup/pHash-0.9.6
+	url = git@github.com:raingo/pHash-mirror.git
+[submodule "dedup/mih"]
+	path = dedup/mih
+	url = git@github.com:raingo/mih.git

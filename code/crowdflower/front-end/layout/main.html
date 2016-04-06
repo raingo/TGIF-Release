@@ -1,0 +1,16 @@
+
+<img class="gif" src="{{url1}}" alt="task" />
+<cml:text label="Please describe the animated GIF in one English sentence." name="input" validates="required ss-required clean:['trim','multipleWhitespace'] yext_no_international_url">
+<cml:gold regex='.*' />
+<cml:instructions>
+<p>Please pay attention to grammar and spelling. Focus on the <mark>visual content</mark> presented in the animated GIF.</p>
+<p>Following are <mark>BAD</mark> sentences.</p>
+<ul>
+    <li>I love this GIF. -- too short (4 words only) and not describing the animated GIF</li>
+    <li>be happy, do not worry for nothing, blesses -- subjective judgments/comments, slightly ungrammatical</li>
+    <li>A clip from one of the many harry potter films. -- mentioning the movie name </li>
+</ul>
+</cml:instructions>
+</cml:text>
+<cml:hidden name="Describe an animated GIF" value="ERROR" gold="true" />
+<cml:hidden label="contributors_browser" validates="user_agent" />
