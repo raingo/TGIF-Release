@@ -3,7 +3,7 @@
 The Tumblr GIF (TGIF) dataset contains 100K animated GIFs and 120K sentences describing visual content of the animated GIFs. The animated GIFs have been collected from Tumblr, from randomly selected posts published between May and June of 2015. We provide the URLs of animated GIFs in this release. The sentences are collected via crowdsourcing, with a carefully designed annotation interface that ensures high quality dataset. We provide one sentence per animated GIF for the training and validation splits, and three sentences per GIF for the test split. The dataset shall be used to evaluate animated GIF/video description techniques.
 
 
-If you end up using the dataset, we ask you to cite the following paper:
+If you end up using the dataset, we ask you to cite the following paper: [preprint](https://arxiv.org/abs/1604.02748)
 
   Yuncheng Li, Yale Song, Liangliang Cao, Joel Tetreault, Larry Goldberg,
   Alejandro Jaimes, Jiebo Luo. "TGIF: A New Dataset and Benchmark on Animated
