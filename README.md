@@ -49,19 +49,6 @@ Examples:
 Sentences generated using the CNN-Finetune model. Use this file to reproduce
 results we reported in Table 4 of our CVPR 2016 paper (last row).
 
-Examples:
-
-1. https://38.media.tumblr.com/09534b090b32801e5eeac1dd46ce4495/tumblr_ngf9rveb2q1sh98coo1_400.gif	a white car is driving on a road .
-1. https://38.media.tumblr.com/3ac51f5a538cd87b7d8f7a89eb89a7b7/tumblr_neaak1zNkv1qmr78eo1_400.gif	a person is holding a red and white cat .
-1. https://31.media.tumblr.com/8e8f5568918fb53904ced91b1fa4a53d/tumblr_nq622eUZ2O1twfmf3o1_400.gif	a woman is holding a baby and a cat is laying on her bed .
-1. https://38.media.tumblr.com/8891ca44416a2c2baabb5902a37797c1/tumblr_nb58nff2VI1qmrkoro1_250.gif	a woman is holding a cat s hand and then it it .
-1. https://38.media.tumblr.com/44e1e3cb5a48e698db89c9e2f0b24125/tumblr_njxosqUqVm1r2uad8o1_250.gif	a group of young men are sitting together .
-1. https://38.media.tumblr.com/35b37ee8bed3fadf813edb66c5752888/tumblr_ng4jraMcwT1u3gi2vo1_500.gif	two men are sitting together and one is talking .
-1. https://31.media.tumblr.com/7043a682ce549cab345e4a79a3510101/tumblr_na18cqVtG31sd26g0o1_500.gif	a woman is holding a cigarette and blowing smoke from her .
-1. https://31.media.tumblr.com/9b59f19ac02febd3e651436bb0250238/tumblr_n9buvpXnDu1rhs3x9o1_400.gif	a man is walking in front of a building .
-1. https://38.media.tumblr.com/17bdef6f42954defdd0b250a5788e54a/tumblr_nf21kqOJiD1siwn55o1_500.gif	two men are standing together and one is talking .
-1. https://38.media.tumblr.com/751085818965d2042dd1ecf038561e3e/tumblr_ni0zbqqPTH1tmeg7go1_500.gif	a woman is walking in a dark room .
-
 ### ./data/eval.py
 Python script to evaluate performance in terms of BLUE, METEOR, ROUGE_L, and CIDEr.
 
