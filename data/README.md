@@ -17,7 +17,7 @@ Contains train/test splits used in our CVPR 2016 paper. We include one sentence 
 Contains the results of GIF2Movie experiments mentioned in our CVPR paper. Both files are generated using the baseline LSTM model on the testing set of the corresponding dataset.
 
 ## Performance Evaluation
-1. Download [Microsoft COCO Caption Evaluation](https://github.com/tylin/coco-caption) and check if it contains `coco-caption/pycocoevalcap/meteor/meteor-1.5.jar` As a reference, we used the commit id 61de92984e35da4989d8c32084bca7dd39c9e9e4.
+1. Assume the entire repository was cloned with `git clone https://github.com/raingo/TGIF-Release.git --recursive`. The `--recursive` will download the right evaluation metric code
 2. Run the evaluation code `python eval.py results-lstm-cnn-finetune-cvpr16.tsv`. The terminal output should look similar to the following:
 ```
 tokenization...
