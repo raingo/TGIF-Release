@@ -50,7 +50,7 @@ Sentences generated using the CNN-Finetune model. Use this file to reproduce
 results we reported in Table 4 of our CVPR 2016 paper (last row).
 
 ### ./data/eval.py
-Python script to evaluate performance in terms of BLUE, METEOR, ROUGE_L, and CIDEr.
+Python script to evaluate performance in terms of BLEU, METEOR, ROUGE_L, and CIDEr.
 
 Refer to `./data/README.md` for instructions.
 
