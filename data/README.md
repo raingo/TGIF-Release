@@ -8,7 +8,7 @@ The animated GIF URLs and descriptions. Each row contains a URL and a sentence, 
 Sentences generated using the CNN-Finetune model. Use this file to reproduce results we reported in Table 4 of our CVPR 2016 paper (last row).
 
 ## eval.py
-Python script to evaluate performance in terms of BLUE, METEOR, ROUGE_L, and CIDEr. See below for how to use this script to evaluate performance of your own generated sentences.
+Python script to evaluate performance in terms of BLEU, METEOR, ROUGE_L, and CIDEr. See below for how to use this script to evaluate performance of your own generated sentences.
 
 ## ./splits
 Contains train/test splits used in our CVPR 2016 paper. We include one sentence per GIF for training split, three sentence per GIF for test split.
