@@ -1,0 +1,38 @@
+<!-- About Section -->
+<section class="success" id="download">
+  <div class="container">
+    <div class="row">
+      <div class="col-lg-12 text-center">
+        <h2>Download</h2>
+        <hr class="star-light">
+      </div>
+    </div>
+    <div class="row">
+      <div class="col-lg-8 col-lg-offset-2 text-center">
+        <div class="btn-group2">
+          {% for link in site.links %}
+          <a href="{{link.url}}" class="btn btn-lg btn-outline">
+            <i class="fa fa-download"></i> {{link.title}}
+          </a>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+    <div class="row">
+      <div class="col-lg-8 col-lg-offset-2 text-left">
+        <h3>Citation</h3>
+        <pre class="text-left">@ARTICLE{tgif-cvpr2016,
+  author = { {Li}, Y. and {Song}, Y. and {Cao}, L. and {Tetreault}, J. and
+    {Goldberg}, L. and {Jaimes}, A. and {Luo}, J.},
+  title = "{TGIF: A New Dataset and Benchmark on Animated GIF Description}",
+  journal = {ArXiv e-prints},
+  archivePrefix = "arXiv",
+  eprint = {1604.02748},
+  primaryClass = "cs.CV",
+  year = 2016,
+  month = apr,
+}</pre>
+      </div>
+    </div>
+  </div>
+</section>

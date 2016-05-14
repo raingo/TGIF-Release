@@ -1,0 +1,25 @@
+<!-- Example Section -->
+<section class='success' id="authors">
+  <div class="container">
+    <div class="row">
+      <div class="col-lg-12 text-center">
+        <h2>People</h2>
+        <hr class="star-light">
+      </div>
+    </div>
+    <div class="row">
+      {% for author in site.authors %}
+      <div class="col-sm-4 col-md-3">
+        <div class='thumbnail'>
+          <a target='_blank' href="{{author.link}}">
+          <img src="{{author.avatar}}" alt="{{author.name}} avatar" width="200" /></a>
+          <div class="caption">
+            <a target='_blank' href="{{author.link|#}}"><p>{{author.name}}</p></a>
+            <p>{{author.inst}}</p>
+          </div>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+</section>

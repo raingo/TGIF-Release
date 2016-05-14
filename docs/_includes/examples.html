@@ -1,0 +1,23 @@
+<!-- Example Section -->
+<section id="examples">
+  <div class="container">
+    <div class="row">
+      <div class="col-lg-12 text-center">
+        <h2>Data Examples</h2>
+        <hr class="star-primary">
+      </div>
+    </div>
+    <div class="row">
+      {% for example in site.examples %}
+      <div class="col-sm-6 col-md-4">
+        <div class="thumbnail fixed-panel">
+          <img class="img-responsive img-fixed" src="{{example.url}}" alt="{{example.caption}}" />
+          <div class="caption">
+            <p>{{example.caption}}</p>
+          </div>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+</section>
