@@ -1,3 +1,393 @@
-<h1 id="tgif">TGIF</h1>
+<!DOCTYPE html>
+<html>
+    <head>
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <title>Tumblr GIF Description Dataset</title>
+    <meta name="viewport" content="width=device-width">
+    <meta name="description" content="The Tumblr GIF (TGIF) dataset contains 100K animated GIFs and 120K sentences describing visual content of the animated GIFs. The animated GIFs have been collected from Tumblr, from randomly selected posts published between May and June of 2015. We provide the URLs of animated GIFs in this release. The sentences are collected via crowdsourcing, with a carefully designed annotation interface that ensures high quality dataset. We provide one sentence per animated GIF for the training and validation splits, and three sentences per GIF for the test split. The dataset shall be used to evaluate animated GIF/video description techniques.">
+    <meta name="author" content="Yuncheng Li">
+    <link rel="canonical" href="http://raingo.github.io/TGIF-Release//">
+    <link rel="alternate" type="application/rss+xml" title="RSS" href="/feed.xml">
 
-<p>Testing</p>
+    <!-- Custom CSS & Bootstrap Core CSS - Uses Bootswatch Flatly Theme: http://bootswatch.com/flatly/ -->
+    <link href="https://maxcdn.bootstrapcdn.com/bootswatch/3.3.6/flatly/bootstrap.min.css" rel="stylesheet" integrity="sha384-XYCjB+hFAjSbgf9yKUgbysEjaVLOXhCgATTEBpCqT1R3jvG5LGRAK5ZIyRbH5vpX" crossorigin="anonymous">
+    <link rel="stylesheet" href="/css/main.css">
+
+    <!-- Google verification -->
+    
+
+    <!-- Bing Verification -->
+    
+
+    <!-- Custom Fonts -->
+    <link href="//maxcdn.bootstrapcdn.com/font-awesome/4.6.3/css/font-awesome.min.css" rel="stylesheet" type="text/css">
+    <link href="//fonts.googleapis.com/css?family=Montserrat:400,700" rel="stylesheet" type="text/css">
+    <link href="//fonts.googleapis.com/css?family=Lato:400,700,400italic,700italic" rel="stylesheet" type="text/css">
+
+    <!-- jQuery Version 1.11.0 -->
+    <script src="//cdnjs.cloudflare.com/ajax/libs/jquery/1.12.3/jquery.min.js"></script>
+
+    <!-- Bootstrap Core JavaScript -->
+    <script src="//maxcdn.bootstrapcdn.com/bootstrap/3.3.6/js/bootstrap.min.js" integrity="sha384-0mSbJDEHialfmuBBQP6A4Qrprq5OVfW37PRR3j5ELqxss1yVqOtnepnHVP9aJ7xS" crossorigin="anonymous"></script>
+
+    <!-- Plugin JavaScript -->
+    <script src="//cdnjs.cloudflare.com/ajax/libs/jquery-easing/1.3/jquery.easing.min.js"></script>
+
+    <!-- Custom Theme JavaScript -->
+    <script src="/js/main.js"></script>
+
+    <!-- HTML5 Shim and Respond.js IE8 support of HTML5 elements and media queries -->
+    <!-- WARNING: Respond.js doesn't work if you view the page via file:// -->
+    <!--[if lt IE 9]>
+        <script src="//oss.maxcdn.com/libs/html5shiv/3.7.0/html5shiv.js"></script>
+        <script src="//oss.maxcdn.com/libs/respond.js/1.4.2/respond.min.js"></script>
+    <![endif]-->
+</head>
+
+    <body id="page-top" class="index">
+       <!-- Navigation -->
+    <nav class="navbar navbar-default navbar-fixed-top">
+        <div class="container">
+            <!-- Brand and toggle get grouped for better mobile display -->
+            <div class="navbar-header page-scroll">
+                <button type="button" class="navbar-toggle" data-toggle="collapse" data-target="#bs-example-navbar-collapse-1">
+                    <span class="sr-only">Toggle navigation</span>
+                    <span class="icon-bar"></span>
+                    <span class="icon-bar"></span>
+                    <span class="icon-bar"></span>
+                </button>
+                <a class="navbar-brand" href="#page-top">Tumblr GIF Description Dataset</a>
+            </div>
+
+            <!-- Collect the nav links, forms, and other content for toggling -->
+            <div class="collapse navbar-collapse" id="bs-example-navbar-collapse-1">
+                <ul class="nav navbar-nav navbar-right">
+                    <li class="hidden">
+                        <a href="#page-top"></a>
+                    </li>
+                    <li class="page-scroll">
+                        <a href="#overview">Overview</a>
+                    </li>
+                    <li class="page-scroll">
+                        <a href="#download">Download</a>
+                    </li>
+                    <li class="page-scroll">
+                        <a href="#examples">Examples</a>
+                    </li>
+                    <li class="page-scroll">
+                        <a href="#authors">People</a>
+                    </li>
+                </ul>
+            </div>
+            <!-- /.navbar-collapse -->
+        </div>
+        <!-- /.container-fluid -->
+    </nav>
+
+    <!-- Header -->
+<header>
+  <div class="container">
+    <div class="row">
+      <div class="col-lg-12">
+        <!--img class="img-responsive" src="img/profile.gif" alt=""--!>
+        <div class="intro-text">
+          <span class="name">Tumblr GIF Description Dataset</span>
+          <hr class="star-light">
+          <span class="skills">Animated GIF Description - Sequence to Sequence - Video Captioning</span>
+          <hr class="star-light">
+          <span class="skills">Yahoo Research & University of Rochester</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</header>
+
+    <!-- About Section -->
+<section id="overview">
+  <div class="container">
+    <div class="row">
+      <div class="col-lg-12 text-center">
+        <h2>Overview</h2>
+        <hr class="star-primary">
+      </div>
+    </div>
+    <div class="row">
+      <div class="col-lg-8 col-lg-offset-2">
+        <p>
+        The Tumblr GIF (TGIF) dataset contains 100K animated GIFs and 120K sentences describing visual content of the animated GIFs. The animated GIFs have been collected from Tumblr, from randomly selected posts published between May and June of 2015. We provide the URLs of animated GIFs in this release.
+        The sentences are collected via crowdsourcing, with a carefully designed annotation interface that ensures high quality dataset. We provide one sentence per animated GIF for the training and validation splits, and three sentences per GIF for the test split. The dataset shall be used to evaluate animated GIF/video description techniques.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+    <!-- About Section -->
+<section class="success" id="download">
+  <div class="container">
+    <div class="row">
+      <div class="col-lg-12 text-center">
+        <h2>Download</h2>
+        <hr class="star-light">
+      </div>
+    </div>
+    <div class="row">
+      <div class="col-lg-8 col-lg-offset-2 text-center">
+        <div class="btn-group2">
+          
+          <a href="http://arxiv.org/abs/1604.02748" class="btn btn-lg btn-outline">
+            <i class="fa fa-download"></i> Research Paper
+          </a>
+          
+          <a href="https://github.com/raingo/TGIF-Release/archive/master.zip" class="btn btn-lg btn-outline">
+            <i class="fa fa-download"></i> Dataset
+          </a>
+          
+          <a href="https://github.com/raingo/TGIF-Release/tree/master/code/gif2txt-lstm" class="btn btn-lg btn-outline">
+            <i class="fa fa-download"></i> Source code
+          </a>
+          
+          <a href="https://github.com/raingo/TGIF-Release/tree/master/code/gif2txt-lstm" class="btn btn-lg btn-outline">
+            <i class="fa fa-download"></i> Pretrained model
+          </a>
+          
+          <a href="https://github.com/raingo/TGIF-Release/tree/master/data" class="btn btn-lg btn-outline">
+            <i class="fa fa-download"></i> Evaluation pipeline
+          </a>
+          
+          <a href="https://github.com/raingo/TGIF-Release/tree/master/code/crowdflower" class="btn btn-lg btn-outline">
+            <i class="fa fa-download"></i> Crowdsourcing pipeline
+          </a>
+          
+          <a href="https://github.com/raingo/TGIF-Release/tree/master/code/gifs-filter" class="btn btn-lg btn-outline">
+            <i class="fa fa-download"></i> Animated GIF filtering pipeline
+          </a>
+          
+        </div>
+      </div>
+    </div>
+    <div class="row">
+      <div class="col-lg-8 col-lg-offset-2 text-left">
+        <h3>Citation</h3>
+        <pre class="text-left">@ARTICLE{tgif-cvpr2016,
+  author = { {Li}, Y. and {Song}, Y. and {Cao}, L. and {Tetreault}, J. and
+    {Goldberg}, L. and {Jaimes}, A. and {Luo}, J.},
+  title = "{TGIF: A New Dataset and Benchmark on Animated GIF Description}",
+  journal = {ArXiv e-prints},
+  archivePrefix = "arXiv",
+  eprint = {1604.02748},
+  primaryClass = "cs.CV",
+  year = 2016,
+  month = apr,
+}</pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+    <!-- Example Section -->
+<section id="examples">
+  <div class="container">
+    <div class="row">
+      <div class="col-lg-12 text-center">
+        <h2>Data Examples</h2>
+        <hr class="star-primary">
+      </div>
+    </div>
+    <div class="row">
+      
+      <div class="col-sm-6 col-md-4">
+        <div class="thumbnail fixed-panel">
+          <img class="img-responsive img-fixed" src="https://38.media.tumblr.com/c678d23cc06da4c26bff31917869f7d6/tumblr_njqj3bMKQF1unc0x7o1_250.gif" alt="A well-dressed young guy with gelled red hair glides across a room and scans it with his eyes." />
+          <div class="caption">
+            <p>A well-dressed young guy with gelled red hair glides across a room and scans it with his eyes.</p>
+          </div>
+        </div>
+      </div>
+      
+      <div class="col-sm-6 col-md-4">
+        <div class="thumbnail fixed-panel">
+          <img class="img-responsive img-fixed" src="https://31.media.tumblr.com/f3b0a9dc22105af5ff5d4aea1949ca82/tumblr_ni35trgNe41tmk5mfo1_400.gif" alt="a woman in a car is singing." />
+          <div class="caption">
+            <p>a woman in a car is singing.</p>
+          </div>
+        </div>
+      </div>
+      
+      <div class="col-sm-6 col-md-4">
+        <div class="thumbnail fixed-panel">
+          <img class="img-responsive img-fixed" src="https://33.media.tumblr.com/836532fd532ee61138509a337b0c3dde/tumblr_nkq8h0OfgA1shch57o1_400.gif" alt="a person is waving and smiling while looking to the right." />
+          <div class="caption">
+            <p>a person is waving and smiling while looking to the right.</p>
+          </div>
+        </div>
+      </div>
+      
+      <div class="col-sm-6 col-md-4">
+        <div class="thumbnail fixed-panel">
+          <img class="img-responsive img-fixed" src="https://38.media.tumblr.com/97b98d180299650111ea04bc4487dcb5/tumblr_nh9zdtgglQ1stmsx9o1_500.gif" alt="two boys sit and smile, and one of them laughs while the other gazes at him." />
+          <div class="caption">
+            <p>two boys sit and smile, and one of them laughs while the other gazes at him.</p>
+          </div>
+        </div>
+      </div>
+      
+      <div class="col-sm-6 col-md-4">
+        <div class="thumbnail fixed-panel">
+          <img class="img-responsive img-fixed" src="https://38.media.tumblr.com/c4d9d1f5927419e1a85f84283ee8a4d3/tumblr_nowrsiLfnR1tquvfgo1_400.gif" alt="a man with a microphone is drinking a beverage." />
+          <div class="caption">
+            <p>a man with a microphone is drinking a beverage.</p>
+          </div>
+        </div>
+      </div>
+      
+      <div class="col-sm-6 col-md-4">
+        <div class="thumbnail fixed-panel">
+          <img class="img-responsive img-fixed" src="https://33.media.tumblr.com/b01969ba0ab6669a91244401b662967b/tumblr_nb2mucKMeU1tkz79uo1_250.gif" alt="a man wearing a suit smiles at something in the distance." />
+          <div class="caption">
+            <p>a man wearing a suit smiles at something in the distance.</p>
+          </div>
+        </div>
+      </div>
+      
+    </div>
+  </div>
+</section>
+
+    <!-- Example Section -->
+<section class='success' id="authors">
+  <div class="container">
+    <div class="row">
+      <div class="col-lg-12 text-center">
+        <h2>People</h2>
+        <hr class="star-light">
+      </div>
+    </div>
+    <div class="row">
+      
+      <div class="col-sm-4 col-md-3">
+        <div class='thumbnail'>
+          <a target='_blank' href="https://www.cs.rochester.edu/u/yli/">
+          <img src="https://www.cs.rochester.edu/u/yli/image/yli_200-200.JPG" alt="Yuncheng Li avatar" width="200" /></a>
+          <div class="caption">
+            <a target='_blank' href="https://www.cs.rochester.edu/u/yli/"><p>Yuncheng Li</p></a>
+            <p>University of Rochester</p>
+          </div>
+        </div>
+      </div>
+      
+      <div class="col-sm-4 col-md-3">
+        <div class='thumbnail'>
+          <a target='_blank' href="http://people.csail.mit.edu/yalesong/home/">
+          <img src="http://people.csail.mit.edu/yalesong/home/img/yale.JPG" alt="Yale Song avatar" width="200" /></a>
+          <div class="caption">
+            <a target='_blank' href="http://people.csail.mit.edu/yalesong/home/"><p>Yale Song</p></a>
+            <p>Yahoo! Research</p>
+          </div>
+        </div>
+      </div>
+      
+      <div class="col-sm-4 col-md-3">
+        <div class='thumbnail'>
+          <a target='_blank' href="http://llcao.net/">
+          <img src="https://scholar.google.com/citations?view_op=view_photo&user=S-hBSfIAAAAJ&citpid=5" alt="Liangliang Cao avatar" width="200" /></a>
+          <div class="caption">
+            <a target='_blank' href="http://llcao.net/"><p>Liangliang Cao</p></a>
+            <p>Yahoo! Research</p>
+          </div>
+        </div>
+      </div>
+      
+      <div class="col-sm-4 col-md-3">
+        <div class='thumbnail'>
+          <a target='_blank' href="https://scholar.google.com/citations?user=Fn52EXUAAAAJ&hl=en">
+          <img src="https://scholar.google.com/citations?view_op=view_photo&user=Fn52EXUAAAAJ&citpid=1" alt="Joel Tetreault avatar" width="200" /></a>
+          <div class="caption">
+            <a target='_blank' href="https://scholar.google.com/citations?user=Fn52EXUAAAAJ&hl=en"><p>Joel Tetreault</p></a>
+            <p>Yahoo! Research</p>
+          </div>
+        </div>
+      </div>
+      
+      <div class="col-sm-4 col-md-3">
+        <div class='thumbnail'>
+          <a target='_blank' href="https://www.linkedin.com/in/lgoldberg">
+          <img src="https://media.licdn.com/mpr/mpr/shrinknp_400_400/p/3/000/016/336/31cf129.jpg" alt="Larry Goldberg avatar" width="200" /></a>
+          <div class="caption">
+            <a target='_blank' href="https://www.linkedin.com/in/lgoldberg"><p>Larry Goldberg</p></a>
+            <p>Yahoo!</p>
+          </div>
+        </div>
+      </div>
+      
+      <div class="col-sm-4 col-md-3">
+        <div class='thumbnail'>
+          <a target='_blank' href="https://www.linkedin.com/in/alexjaimes">
+          <img src="https://media.licdn.com/media/p/2/000/199/146/36f61c1.jpg" alt="Alejandro Jaimes avatar" width="200" /></a>
+          <div class="caption">
+            <a target='_blank' href="https://www.linkedin.com/in/alexjaimes"><p>Alejandro Jaimes</p></a>
+            <p>AiCure</p>
+          </div>
+        </div>
+      </div>
+      
+      <div class="col-sm-4 col-md-3">
+        <div class='thumbnail'>
+          <a target='_blank' href="http://www.cs.rochester.edu/u/jluo/">
+          <img src="https://lh5.googleusercontent.com/-dV93x6frPFw/UTkTgJT7huI/AAAAAAAAalA/XhMeDDCaHSs/w448-h375-o-k/Jiebo-Bigdata.jpg" alt="Jiebo Luo avatar" width="200" /></a>
+          <div class="caption">
+            <a target='_blank' href="http://www.cs.rochester.edu/u/jluo/"><p>Jiebo Luo</p></a>
+            <p>University of Rochester</p>
+          </div>
+        </div>
+      </div>
+      
+    </div>
+  </div>
+</section>
+
+        <!-- Footer -->
+    <footer class="text-center">
+        <div class="footer-above">
+            <div class="container">
+                <div class="row">
+                    <div class="footer-col col-md-6">
+                        <h3>Contact</h3>
+                        <p>
+                            
+                                229 West 43rd Street <br>
+		                    
+                                New York, NY, 10036, US <br>
+		                    
+                                <i class="fa fa-envelope" aria-hidden="true"></i> Email: yli@cs.rochester.edu <br>
+		                    
+                        </p>
+                    </div>
+                    <div class="footer-col col-md-6">
+                        <h3>Acknowledgement</h3>
+                        <p>We thank the Flickr vision team, including Gerry Pesavento, Huy Nguyen and others for their support and help in collecting descriptions via crowdsourcing.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="footer-below">
+            <div class="container">
+                <div class="row">
+                    <div class="col-lg-12">
+                        Copyright &copy; Yahoo! Inc. 2016
+                    </div>
+                </div>
+            </div>
+        </div>
+    </footer>
+
+    <!-- Scroll to Top Button (Only visible on small and extra-small screen sizes) -->
+    <div class="scroll-top page-scroll visible-xs visible-sm">
+        <a class="btn btn-primary" href="#page-top">
+            <i class="fa fa-chevron-up"></i>
+        </a>
+    </div>
+
+    </body>
+</html>
