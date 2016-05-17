@@ -8,10 +8,23 @@
     <meta name="description" content="The Tumblr GIF (TGIF) dataset contains 100K animated GIFs and 120K sentences describing visual content of the animated GIFs. The animated GIFs have been collected from Tumblr, from randomly selected posts published between May and June of 2015. We provide the URLs of animated GIFs in this release. The sentences are collected via crowdsourcing, with a carefully designed annotation interface that ensures high quality dataset. We provide one sentence per animated GIF for the training and validation splits, and three sentences per GIF for the test split. The dataset shall be used to evaluate animated GIF/video description techniques.">
     <meta name="author" content="Yuncheng Li">
     <link rel="canonical" href="http://raingo.github.io/TGIF-Release//">
-    <link rel="alternate" type="application/rss+xml" title="RSS" href="/feed.xml">
+
+    <!-- jQuery Version 1.11.0 -->
+    <script src="//cdnjs.cloudflare.com/ajax/libs/jquery/1.12.3/jquery.min.js"></script>
+
+    <!-- Plugin JavaScript -->
+    <script src="//cdnjs.cloudflare.com/ajax/libs/jquery-easing/1.3/jquery.easing.min.js"></script>
+
+    <!-- Custom Theme JavaScript -->
+    <script src="/TGIF-Release/js/main.js"></script>
+
 
     <!-- Custom CSS & Bootstrap Core CSS - Uses Bootswatch Flatly Theme: http://bootswatch.com/flatly/ -->
     <link href="https://maxcdn.bootstrapcdn.com/bootswatch/3.3.6/flatly/bootstrap.min.css" rel="stylesheet" integrity="sha384-XYCjB+hFAjSbgf9yKUgbysEjaVLOXhCgATTEBpCqT1R3jvG5LGRAK5ZIyRbH5vpX" crossorigin="anonymous">
+    <!-- Bootstrap Core JavaScript -->
+    <script src="//maxcdn.bootstrapcdn.com/bootstrap/3.3.6/js/bootstrap.min.js" integrity="sha384-0mSbJDEHialfmuBBQP6A4Qrprq5OVfW37PRR3j5ELqxss1yVqOtnepnHVP9aJ7xS" crossorigin="anonymous"></script>
+
+    <!-- customer css -->
     <link rel="stylesheet" href="/TGIF-Release/css/main.css">
 
     <!-- Google verification -->
@@ -25,17 +38,6 @@
     <link href="//fonts.googleapis.com/css?family=Montserrat:400,700" rel="stylesheet" type="text/css">
     <link href="//fonts.googleapis.com/css?family=Lato:400,700,400italic,700italic" rel="stylesheet" type="text/css">
 
-    <!-- jQuery Version 1.11.0 -->
-    <script src="//cdnjs.cloudflare.com/ajax/libs/jquery/1.12.3/jquery.min.js"></script>
-
-    <!-- Bootstrap Core JavaScript -->
-    <script src="//maxcdn.bootstrapcdn.com/bootstrap/3.3.6/js/bootstrap.min.js" integrity="sha384-0mSbJDEHialfmuBBQP6A4Qrprq5OVfW37PRR3j5ELqxss1yVqOtnepnHVP9aJ7xS" crossorigin="anonymous"></script>
-
-    <!-- Plugin JavaScript -->
-    <script src="//cdnjs.cloudflare.com/ajax/libs/jquery-easing/1.3/jquery.easing.min.js"></script>
-
-    <!-- Custom Theme JavaScript -->
-    <script src="/TGIF-Release/js/main.js"></script>
 
     <!-- HTML5 Shim and Respond.js IE8 support of HTML5 elements and media queries -->
     <!-- WARNING: Respond.js doesn't work if you view the page via file:// -->
@@ -119,6 +121,80 @@
         The sentences are collected via crowdsourcing, with a carefully designed annotation interface that ensures high quality dataset. We provide one sentence per animated GIF for the training and validation splits, and three sentences per GIF for the test split. The dataset shall be used to evaluate animated GIF/video description techniques.
         </p>
       </div>
+      <div class="col-lg-12 text-center">
+        <h3>Basic Statistics</h3>
+      </div>
+      <div class="col-lg-8 col-lg-offset-2">
+        <table class="table table-striped table-hover text-center">
+          <thead>
+            <tr>
+              <td>Splits</td>
+              <td>Train</td>
+              <td>Validation</td>
+              <td>Test</td>
+              <td>Overall</td>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td># Animated GIFs</td>
+              <td>80,000</td>
+              <td>10,708</td>
+              <td>11,360</td>
+              <td>102,068</td>
+            </tr>
+            <tr>
+              <td># Frames (Total/Average)</td>
+              <td>3,258,373/40.76</td>
+              <td>431,359/40.30</td>
+              <td>453,718/39.96</td>
+              <td>4,143,450/40.62</td>
+            </tr>
+            <tr>
+              <td># Shots (Total/Average)</td>
+              <td>204,553/2.56</td>
+              <td>26,559/2.48</td>
+              <td>27,933/2.46</td>
+              <td>259,338/2.54</td>
+            </tr>
+            <tr>
+              <td>Duration (Total/Average)</td>
+              <td>81h/3.66s</td>
+              <td>11h/3.60s</td>
+              <td>12h/3.65s</td>
+              <td>103h/3.65s</td>
+            </tr>
+            <tr>
+              <td># Sentences (Total/Average)</td>
+              <td>80,000/1</td>
+              <td>10,708/1</td>
+              <td>34,101/3</td>
+              <td>125,782/1.23</td>
+            </tr>
+            <tr>
+              <td># Tokens (Total/Median)</td>
+              <td>911,593/11</td>
+              <td>10,831/11</td>
+              <td>34,101/11</td>
+              <td>1,418,555/11</td>
+            </tr>
+            <tr>
+              <td># Unique Tokens</td>
+              <td>10,685</td>
+              <td>4,755</td>
+              <td>7,083</td>
+              <td>12,228</td>
+            </tr>
+            <tr>
+              <td>Average Term Frequency</td>
+              <td>85.32</td>
+              <td>25.72</td>
+              <td>54.31</td>
+              <td>116.00</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
     </div>
   </div>
 </section>
@@ -153,7 +229,7 @@
           </a>
           
           <a href="https://github.com/raingo/TGIF-Release/tree/master/data" class="btn btn-lg btn-outline">
-            <i class="fa fa-download"></i> Evaluation pipeline
+            <i class="fa fa-download"></i> Evaluation suite
           </a>
           
           <a href="https://github.com/raingo/TGIF-Release/tree/master/code/crowdflower" class="btn btn-lg btn-outline">
@@ -161,7 +237,7 @@
           </a>
           
           <a href="https://github.com/raingo/TGIF-Release/tree/master/code/gifs-filter" class="btn btn-lg btn-outline">
-            <i class="fa fa-download"></i> Animated GIF filtering pipeline
+            <i class="fa fa-download"></i> Animated GIF filtering
           </a>
           
         </div>
@@ -170,16 +246,12 @@
     <div class="row">
       <div class="col-lg-8 col-lg-offset-2 text-left">
         <h3>Citation</h3>
-        <pre class="text-left">@ARTICLE{tgif-cvpr2016,
-  author = { {Li}, Y. and {Song}, Y. and {Cao}, L. and {Tetreault}, J. and
-    {Goldberg}, L. and {Jaimes}, A. and {Luo}, J.},
+        <pre class="text-left">@InProceedings{tgif-cvpr2016,
+  author = {Li, Yuncheng and Song, Yale and Cao, Liangliang and Tetreault, Joel and Goldberg, Larry and Jaimes, Alejandro and Luo, Jiebo},
   title = "{TGIF: A New Dataset and Benchmark on Animated GIF Description}",
-  journal = {ArXiv e-prints},
-  archivePrefix = "arXiv",
-  eprint = {1604.02748},
-  primaryClass = "cs.CV",
-  year = 2016,
-  month = apr,
+  booktitle = {The IEEE Conference on Computer Vision and Pattern Recognition (CVPR)},
+  month = {June},
+  year = {2016}
 }</pre>
       </div>
     </div>
@@ -269,7 +341,7 @@
       <div class="col-sm-4 col-md-3">
         <div class='thumbnail'>
           <a target='_blank' href="https://www.cs.rochester.edu/u/yli/">
-          <img src="https://www.cs.rochester.edu/u/yli/image/yli_200-200.JPG" alt="Yuncheng Li avatar" width="200" /></a>
+          <img class="author" src="https://www.cs.rochester.edu/u/yli/image/yli_200-200.JPG" alt="Yuncheng Li avatar" /></a>
           <div class="caption">
             <a target='_blank' href="https://www.cs.rochester.edu/u/yli/"><p>Yuncheng Li</p></a>
             <p>University of Rochester</p>
@@ -280,7 +352,7 @@
       <div class="col-sm-4 col-md-3">
         <div class='thumbnail'>
           <a target='_blank' href="http://people.csail.mit.edu/yalesong/home/">
-          <img src="http://people.csail.mit.edu/yalesong/home/img/yale.JPG" alt="Yale Song avatar" width="200" /></a>
+          <img class="author" src="http://people.csail.mit.edu/yalesong/home/img/yale.JPG" alt="Yale Song avatar" /></a>
           <div class="caption">
             <a target='_blank' href="http://people.csail.mit.edu/yalesong/home/"><p>Yale Song</p></a>
             <p>Yahoo! Research</p>
@@ -291,7 +363,7 @@
       <div class="col-sm-4 col-md-3">
         <div class='thumbnail'>
           <a target='_blank' href="http://llcao.net/">
-          <img src="https://scholar.google.com/citations?view_op=view_photo&user=S-hBSfIAAAAJ&citpid=5" alt="Liangliang Cao avatar" width="200" /></a>
+          <img class="author" src="https://scholar.google.com/citations?view_op=view_photo&user=S-hBSfIAAAAJ&citpid=5" alt="Liangliang Cao avatar" /></a>
           <div class="caption">
             <a target='_blank' href="http://llcao.net/"><p>Liangliang Cao</p></a>
             <p>Yahoo! Research</p>
@@ -302,7 +374,7 @@
       <div class="col-sm-4 col-md-3">
         <div class='thumbnail'>
           <a target='_blank' href="https://scholar.google.com/citations?user=Fn52EXUAAAAJ&hl=en">
-          <img src="https://scholar.google.com/citations?view_op=view_photo&user=Fn52EXUAAAAJ&citpid=1" alt="Joel Tetreault avatar" width="200" /></a>
+          <img class="author" src="https://scholar.google.com/citations?view_op=view_photo&user=Fn52EXUAAAAJ&citpid=1" alt="Joel Tetreault avatar" /></a>
           <div class="caption">
             <a target='_blank' href="https://scholar.google.com/citations?user=Fn52EXUAAAAJ&hl=en"><p>Joel Tetreault</p></a>
             <p>Yahoo! Research</p>
@@ -313,7 +385,7 @@
       <div class="col-sm-4 col-md-3">
         <div class='thumbnail'>
           <a target='_blank' href="https://www.linkedin.com/in/lgoldberg">
-          <img src="https://media.licdn.com/mpr/mpr/shrinknp_400_400/p/3/000/016/336/31cf129.jpg" alt="Larry Goldberg avatar" width="200" /></a>
+          <img class="author" src="https://media.licdn.com/mpr/mpr/shrinknp_400_400/p/3/000/016/336/31cf129.jpg" alt="Larry Goldberg avatar" /></a>
           <div class="caption">
             <a target='_blank' href="https://www.linkedin.com/in/lgoldberg"><p>Larry Goldberg</p></a>
             <p>Yahoo!</p>
@@ -324,7 +396,7 @@
       <div class="col-sm-4 col-md-3">
         <div class='thumbnail'>
           <a target='_blank' href="https://www.linkedin.com/in/alexjaimes">
-          <img src="https://media.licdn.com/media/p/2/000/199/146/36f61c1.jpg" alt="Alejandro Jaimes avatar" width="200" /></a>
+          <img class="author" src="https://media.licdn.com/media/p/2/000/199/146/36f61c1.jpg" alt="Alejandro Jaimes avatar" /></a>
           <div class="caption">
             <a target='_blank' href="https://www.linkedin.com/in/alexjaimes"><p>Alejandro Jaimes</p></a>
             <p>AiCure</p>
@@ -335,7 +407,7 @@
       <div class="col-sm-4 col-md-3">
         <div class='thumbnail'>
           <a target='_blank' href="http://www.cs.rochester.edu/u/jluo/">
-          <img src="https://lh5.googleusercontent.com/-dV93x6frPFw/UTkTgJT7huI/AAAAAAAAalA/XhMeDDCaHSs/w448-h375-o-k/Jiebo-Bigdata.jpg" alt="Jiebo Luo avatar" width="200" /></a>
+          <img class="author" src="https://lh5.googleusercontent.com/-dV93x6frPFw/UTkTgJT7huI/AAAAAAAAalA/XhMeDDCaHSs/w448-h375-o-k/Jiebo-Bigdata.jpg" alt="Jiebo Luo avatar" /></a>
           <div class="caption">
             <a target='_blank' href="http://www.cs.rochester.edu/u/jluo/"><p>Jiebo Luo</p></a>
             <p>University of Rochester</p>
