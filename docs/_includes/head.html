@@ -6,10 +6,23 @@
     <meta name="description" content="{{ site.description }}">
     {% if site.meta_author %}<meta name="author" content="{{ site.meta_author }}">{% endif %}
     <link rel="canonical" href="{{ page.url | replace:'index.html','' | prepend: site.url }}">
-    <link rel="alternate" type="application/rss+xml" title="RSS" href="/feed.xml">
+
+    <!-- jQuery Version 1.11.0 -->
+    <script src="//cdnjs.cloudflare.com/ajax/libs/jquery/1.12.3/jquery.min.js"></script>
+
+    <!-- Plugin JavaScript -->
+    <script src="//cdnjs.cloudflare.com/ajax/libs/jquery-easing/1.3/jquery.easing.min.js"></script>
+
+    <!-- Custom Theme JavaScript -->
+    <script src="{{ "/js/main.js" | prepend:site.baseurl }}"></script>
+
 
     <!-- Custom CSS & Bootstrap Core CSS - Uses Bootswatch Flatly Theme: http://bootswatch.com/flatly/ -->
     <link href="https://maxcdn.bootstrapcdn.com/bootswatch/3.3.6/flatly/bootstrap.min.css" rel="stylesheet" integrity="sha384-XYCjB+hFAjSbgf9yKUgbysEjaVLOXhCgATTEBpCqT1R3jvG5LGRAK5ZIyRbH5vpX" crossorigin="anonymous">
+    <!-- Bootstrap Core JavaScript -->
+    <script src="//maxcdn.bootstrapcdn.com/bootstrap/3.3.6/js/bootstrap.min.js" integrity="sha384-0mSbJDEHialfmuBBQP6A4Qrprq5OVfW37PRR3j5ELqxss1yVqOtnepnHVP9aJ7xS" crossorigin="anonymous"></script>
+
+    <!-- customer css -->
     <link rel="stylesheet" href="{{ "/css/main.css" | prepend:site.baseurl }}">
 
     <!-- Google verification -->
@@ -23,17 +36,6 @@
     <link href="//fonts.googleapis.com/css?family=Montserrat:400,700" rel="stylesheet" type="text/css">
     <link href="//fonts.googleapis.com/css?family=Lato:400,700,400italic,700italic" rel="stylesheet" type="text/css">
 
-    <!-- jQuery Version 1.11.0 -->
-    <script src="//cdnjs.cloudflare.com/ajax/libs/jquery/1.12.3/jquery.min.js"></script>
-
-    <!-- Bootstrap Core JavaScript -->
-    <script src="//maxcdn.bootstrapcdn.com/bootstrap/3.3.6/js/bootstrap.min.js" integrity="sha384-0mSbJDEHialfmuBBQP6A4Qrprq5OVfW37PRR3j5ELqxss1yVqOtnepnHVP9aJ7xS" crossorigin="anonymous"></script>
-
-    <!-- Plugin JavaScript -->
-    <script src="//cdnjs.cloudflare.com/ajax/libs/jquery-easing/1.3/jquery.easing.min.js"></script>
-
-    <!-- Custom Theme JavaScript -->
-    <script src="{{ "/js/main.js" | prepend:site.baseurl }}"></script>
 
     <!-- HTML5 Shim and Respond.js IE8 support of HTML5 elements and media queries -->
     <!-- WARNING: Respond.js doesn't work if you view the page via file:// -->
